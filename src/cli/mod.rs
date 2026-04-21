@@ -4,6 +4,7 @@ mod list;
 mod pull;
 mod push;
 mod root;
+mod share;
 
 use anyhow::Result;
 use clap::ArgMatches;
@@ -21,6 +22,7 @@ pub fn execute(app: &App, matches: ArgMatches) -> Result<()> {
         Some(("ls", sub_matches)) => list::handle(app, sub_matches),
         Some(("pull", sub_matches)) => pull::handle(app, sub_matches),
         Some(("push", sub_matches)) => push::handle(app, sub_matches),
+        Some(("share", sub_matches)) => share::handle(app, sub_matches),
         _ => Ok(()),
     }
 }

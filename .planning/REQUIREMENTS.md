@@ -28,10 +28,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Sharing
 
-- [ ] **SHARE-01**: User can create a share link for a remote THU Cloud Drive file with `thufs share`
-- [ ] **SHARE-02**: User can set an expiration time when creating a share link
-- [ ] **SHARE-03**: User can set a password when creating a share link
-- [ ] **SHARE-04**: User receives the created share link in a format suitable for terminal and script usage
+- [x] **SHARE-01**: User can create a share link for a remote THU Cloud Drive file with `thufs share`
+- [x] **SHARE-02**: User can set an expiration time when creating a share link
+- [x] **SHARE-03**: User can set a password when creating a share link
+- [x] **SHARE-04**: User receives the created share link in a format suitable for terminal and script usage
 
 ### CLI Experience
 
@@ -86,10 +86,10 @@ Deferred to future release. Tracked but not in current roadmap.
 | XFER-02 | Phase 2 | Complete |
 | XFER-03 | Phase 2 | Complete |
 | XFER-04 | Phase 2 | Complete |
-| SHARE-01 | Phase 3 | Pending |
-| SHARE-02 | Phase 3 | Pending |
-| SHARE-03 | Phase 3 | Pending |
-| SHARE-04 | Phase 3 | Pending |
+| SHARE-01 | Phase 3 | Complete |
+| SHARE-02 | Phase 3 | Complete |
+| SHARE-03 | Phase 3 | Complete |
+| SHARE-04 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 17 total
@@ -98,4 +98,4 @@ Deferred to future release. Tracked but not in current roadmap.
 
 ---
 *Requirements defined: 2026-04-21*
-*Last updated: 2026-04-21 after Phase 2 execution*
+*Last updated: 2026-04-21 after Phase 3 execution*

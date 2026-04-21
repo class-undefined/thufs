@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation and Command Contract** - Establish CLI structure, auth/config model, and path semantics.
 - [x] **Phase 2: Listing and Transfer Core** - Deliver `ls`, `push`, and `pull` on top of the Seafile-backed client.
-- [ ] **Phase 3: Share Workflow** - Deliver `thufs share` with password and expiration support.
+- [x] **Phase 3: Share Workflow** - Deliver `thufs share` with password and expiration support.
 - [ ] **Phase 4: Hardening and Release Readiness** - Lock in reliability, tests, docs, and packaging behavior for real shell use.
 
 ## Phase Details
@@ -61,8 +61,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: Implement share-link API client behavior and remote target validation
-- [ ] 03-02: Build `thufs share` command UX, output behavior, and regression coverage
+- [x] 03-01: Implement share-link API client behavior and remote target validation
+- [x] 03-02: Build `thufs share` command UX, output behavior, and regression coverage
 
 ### Phase 4: Hardening and Release Readiness
 **Goal**: Make the CLI reliable enough for real shell automation and prepare the project for initial release.
@@ -88,5 +88,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Foundation and Command Contract | 3/3 | Complete | 2026-04-21 |
 | 2. Listing and Transfer Core | 4/4 | Complete | 2026-04-21 |
-| 3. Share Workflow | 0/2 | Not started | - |
+| 3. Share Workflow | 2/2 | Complete | 2026-04-21 |
 | 4. Hardening and Release Readiness | 0/3 | Not started | - |

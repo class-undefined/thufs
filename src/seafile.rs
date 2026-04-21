@@ -51,6 +51,23 @@ pub struct UploadedFile {
     pub size: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareLinkRequest {
+    pub repo_id: String,
+    pub path: String,
+    pub password: Option<String>,
+    pub expire_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShareLink {
+    pub link: String,
+    pub token: Option<String>,
+    pub path: Option<String>,
+    #[serde(default)]
+    pub expire_days: Option<u32>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SeafileClient {
@@ -301,6 +318,33 @@ impl SeafileClient {
                 .await
                 .with_context(|| format!("failed to flush {}", destination.display()))?;
             Ok(bytes.len() as u64)
+        })
+    }
+
+    pub fn create_share_link(&self, request: ShareLinkRequest) -> Result<ShareLink> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            let mut form = vec![("repo_id", request.repo_id), ("path", request.path)];
+
+            if let Some(password) = request.password {
+                form.push(("password", password));
+            }
+            if let Some(expire_days) = request.expire_days {
+                form.push(("expire_days", expire_days.to_string()));
+            }
+
+            self.http
+                .post(format!("{}/api/v2.1/share-links/", self.base_url()))
+                .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .form(&form)
+                .send()
+                .await
+                .context("failed to create share link")?
+                .error_for_status()
+                .context("share link request failed")?
+                .json::<ShareLink>()
+                .await
+                .context("failed to parse share link response")
         })
     }
 
