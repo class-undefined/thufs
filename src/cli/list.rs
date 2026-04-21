@@ -1,11 +1,7 @@
 use anyhow::Result;
 use clap::{Arg, ArgMatches, Command};
 
-use crate::{
-    app::App,
-    config::ConfigManager,
-    seafile::{DirectoryEntry, EntryKind, Repository},
-};
+use crate::{app::App, config::ConfigManager};
 
 pub fn build_command() -> Command {
     Command::new("ls")
@@ -23,25 +19,7 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
         .expect("required by clap");
 
     let config = ConfigManager::new();
-    let demo_entries = vec![DirectoryEntry {
-        name: "placeholder".to_string(),
-        path: "/placeholder".to_string(),
-        kind: EntryKind::Dir,
-        size: None,
-    }];
-
-    let result = app.list_service.list_with_repositories(
-        remote,
-        &config,
-        &[Repository {
-            id: "repo-placeholder".to_string(),
-            name: config
-                .load_resolved()?
-                .default_repo
-                .unwrap_or_else(|| "placeholder".to_string()),
-        }],
-        &demo_entries,
-    )?;
+    let result = app.list_service.list(remote, &config)?;
 
     let mut stdout = std::io::stdout();
     if matches.get_flag("json") {

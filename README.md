@@ -1,24 +1,32 @@
 # thufs
 
-`thufs` is a shell-first CLI for THU Cloud Drive users who want predictable terminal workflows instead of sync-heavy desktop behavior.
+`thufs` is a shell-first CLI for THU Cloud Drive users who want predictable terminal workflows instead of sync-heavy desktop behavior. It is intentionally THU-only, single-account, and focused on four flat business verbs: `ls`, `push`, `pull`, and `share`.
 
-## Phase 1 Contract
+## Install
 
-- Authentication is token-driven. `thufs` stores a token obtained outside the CLI and does not implement username/password login.
-- Configuration is file-first. Environment variables override the resolved config, but local config remains the default operator path.
-- Management commands are grouped under `thufs auth` and `thufs config`. Business verbs such as `push`, `pull`, `ls`, and `share` stay flat.
-- Human-readable output is the default. Add `--json` for machine-readable output.
-- Normal command results go to stdout. Errors go to stderr.
+Build from source:
 
-## Commands
+```bash
+cargo build --release
+./target/release/thufs --help
+```
 
-```text
-thufs auth set-token <token>
+During Rust installation in restricted networks, the project can use the mirror variables:
+
+```bash
+export RUSTUP_DIST_SERVER="https://rsproxy.cn"
+export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+```
+
+## Auth And Config
+
+Authentication is token-driven. `thufs` stores a token obtained outside the CLI and does not implement username/password login.
+
+```bash
+thufs auth set-token <seafile-api-token>
 thufs config show
 thufs --json config show
 ```
-
-## Config
 
 The default config file is `~/.config/thufs/config.json` on Unix-like systems.
 
@@ -29,9 +37,11 @@ Supported environment overrides:
 - `THUFS_OUTPUT`
 - `THUFS_CONFIG_DIR`
 
-## Remote Path
+Configuration is file-first; environment variables override the resolved config for scripts and temporary sessions.
 
-The canonical explicit form is:
+## Remote Paths
+
+The canonical explicit remote form is:
 
 ```text
 repo:<library>/<path>
@@ -39,9 +49,52 @@ repo:<library>/<path>
 
 Examples:
 
-```text
-repo:course-lib/slides/week1.pdf
-repo:backup/code/main.rs
+```bash
+thufs ls repo:course-lib/slides
+thufs push report.pdf repo:course-lib/submissions/report.pdf
+thufs pull repo:course-lib/slides/week1.pdf ./week1.pdf
+thufs share repo:course-lib/slides/week1.pdf
 ```
 
-If a `default repo` is configured, shorthand paths such as `notes/todo.md` resolve against that repo. Without a default repo, explicit `repo:<library>/<path>` form is required.
+If `THUFS_DEFAULT_REPO` or config `default_repo` is set, shorthand paths such as `slides/week1.pdf` resolve against that library. Without a default repo, use explicit `repo:<library>/<path>`.
+
+## Commands
+
+List a remote directory:
+
+```bash
+thufs ls repo:course-lib/slides
+thufs --json ls repo:course-lib/slides
+```
+
+Upload a single local file:
+
+```bash
+thufs push ./report.pdf repo:course-lib/submissions/report.pdf
+thufs push --overwrite ./report.pdf repo:course-lib/submissions/report.pdf
+```
+
+Download a single remote file:
+
+```bash
+thufs pull repo:course-lib/slides/week1.pdf ./week1.pdf
+thufs pull --overwrite repo:course-lib/slides/week1.pdf ./week1.pdf
+```
+
+Create a share link:
+
+```bash
+thufs share repo:course-lib/slides/week1.pdf
+thufs share --password secret --expire-days 7 repo:course-lib/slides/week1.pdf
+thufs --json share repo:course-lib/slides/week1.pdf
+```
+
+Human-readable output is the default. Add `--json` for machine-readable output. Normal command results go to stdout; errors go to stderr.
+
+## Scope
+
+`thufs` does not implement full sync, recursive directory transfer, multi-account profiles, or generic Seafile instance targeting in v1.
+
+## Known Limitations
+
+The Seafile HTTP choreography is isolated in `src/seafile.rs` and follows upstream Seafile API shapes, including `POST /api/v2.1/share-links/`. Before an initial public release, these endpoint assumptions should be validated against a real THU Cloud Drive account and token.

@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::{
     config::ConfigManager,
     contract::RemoteRef,
-    seafile::{DirectoryEntry, EntryKind, Repository, SeafileClient},
+    seafile::{DirectoryEntry, EntryKind, SeafileClient},
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -32,11 +32,28 @@ impl ListService {
         Self { client }
     }
 
+    pub fn list(&self, remote: &str, config: &ConfigManager) -> Result<ListResult> {
+        let resolved_config = config.load_resolved()?;
+        let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
+        let repositories = self.client.list_repositories()?;
+        let resolved = self.client.resolve_list_target(&remote, &repositories)?;
+        let entries = self
+            .client
+            .list_directory_entries(&resolved.repo_id, &resolved.path)?;
+
+        Ok(ListResult {
+            repo: resolved.repo_name,
+            path: resolved.path,
+            items: entries.into_iter().map(ListItem::from).collect(),
+        })
+    }
+
+    #[cfg(test)]
     pub fn list_with_repositories(
         &self,
         remote: &str,
         config: &ConfigManager,
-        repositories: &[Repository],
+        repositories: &[crate::seafile::Repository],
         entries: &[DirectoryEntry],
     ) -> Result<ListResult> {
         let resolved_config = config.load_resolved()?;
@@ -46,19 +63,7 @@ impl ListService {
         Ok(ListResult {
             repo: resolved.repo_name,
             path: resolved.path,
-            items: entries
-                .iter()
-                .cloned()
-                .map(|entry| ListItem {
-                    name: entry.name,
-                    path: entry.path,
-                    kind: match entry.kind {
-                        EntryKind::File => "file".to_string(),
-                        EntryKind::Dir => "dir".to_string(),
-                    },
-                    size: entry.size,
-                })
-                .collect(),
+            items: entries.iter().cloned().map(ListItem::from).collect(),
         })
     }
 
@@ -82,6 +87,20 @@ impl ListService {
             lines.push(line);
         }
         lines.join("\n")
+    }
+}
+
+impl From<DirectoryEntry> for ListItem {
+    fn from(entry: DirectoryEntry) -> Self {
+        Self {
+            name: entry.name,
+            path: entry.path,
+            kind: match entry.kind {
+                EntryKind::File => "file".to_string(),
+                EntryKind::Dir => "dir".to_string(),
+            },
+            size: entry.size,
+        }
     }
 }
 
