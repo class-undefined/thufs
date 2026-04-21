@@ -9,9 +9,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Configuration
 
-- [ ] **CONF-01**: User can configure one THU Cloud Drive account for subsequent CLI usage
-- [ ] **CONF-02**: User can store authentication material in a local config format suitable for scriptable reuse
-- [ ] **CONF-03**: User can inspect or validate current configuration without performing a file transfer
+- [x] **CONF-01**: User can configure one THU Cloud Drive account for subsequent CLI usage
+- [x] **CONF-02**: User can store authentication material in a local config format suitable for scriptable reuse
+- [x] **CONF-03**: User can inspect or validate current configuration without performing a file transfer
 
 ### Navigation
 
@@ -35,9 +35,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### CLI Experience
 
-- [ ] **CLI-01**: User can discover available commands and flags through built-in help output
-- [ ] **CLI-02**: User receives error messages on stderr and normal command results on stdout
-- [ ] **CLI-03**: User can use a consistent local-path/remote-path contract across `ls`, `push`, `pull`, and `share`
+- [x] **CLI-01**: User can discover available commands and flags through built-in help output
+- [x] **CLI-02**: User receives error messages on stderr and normal command results on stdout
+- [x] **CLI-03**: User can use a consistent local-path/remote-path contract across `ls`, `push`, `pull`, and `share`
 
 ## v2 Requirements
 
@@ -73,12 +73,12 @@ Deferred to future release. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CONF-01 | Phase 1 | Pending |
-| CONF-02 | Phase 1 | Pending |
-| CONF-03 | Phase 1 | Pending |
-| CLI-01 | Phase 1 | Pending |
-| CLI-02 | Phase 1 | Pending |
-| CLI-03 | Phase 1 | Pending |
+| CONF-01 | Phase 1 | Complete |
+| CONF-02 | Phase 1 | Complete |
+| CONF-03 | Phase 1 | Complete |
+| CLI-01 | Phase 1 | Complete |
+| CLI-02 | Phase 1 | Complete |
+| CLI-03 | Phase 1 | Complete |
 | NAV-01 | Phase 2 | Pending |
 | NAV-02 | Phase 2 | Pending |
 | NAV-03 | Phase 2 | Pending |

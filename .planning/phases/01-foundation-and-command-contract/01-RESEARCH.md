@@ -1,7 +1,7 @@
 # Phase 1: Foundation and Command Contract - Research
 
 **Researched:** 2026-04-21
-**Domain:** Go-based CLI foundation for a Seafile-backed cloud drive client
+**Domain:** CLI foundation for a Seafile-backed cloud drive client
 **Confidence:** MEDIUM
 
 <user_constraints>
@@ -53,11 +53,13 @@ Single-tier application with an external HTTP dependency:
 <research_summary>
 ## Summary
 
-Phase 1 is less about feature delivery and more about freezing the behavioral contract that all later commands will inherit. The standard approach for a Go CLI of this type is a thin Cobra command layer, a dedicated config package that owns file/env precedence, and a separate service/client boundary so future transfer and share operations do not push implementation details into command handlers.
+Phase 1 is less about feature delivery and more about freezing the behavioral contract that all later commands will inherit. The standard approach for a CLI of this type is a thin command layer, a dedicated config package that owns file/env precedence, and a separate service/client boundary so future transfer and share operations do not push implementation details into command handlers.
 
 The most important architectural insight is that path semantics, token handling, and stdout/stderr discipline should be treated as first-class product behavior, not incidental details to improvise during command implementation. Later phases will depend on these contracts being stable; if they drift now, later transfer and share commands will accumulate compatibility debt.
 
-**Primary recommendation:** Establish the Go module, CLI package boundaries, config precedence rules, and explicit remote-path contract in Phase 1, with tests that lock those behaviors before any Seafile-heavy command implementation begins.
+**Primary recommendation:** Establish the CLI package boundaries, config precedence rules, and explicit remote-path contract in Phase 1, with tests that lock those behaviors before any Seafile-heavy command implementation begins.
+
+> Execution note: implementation was ultimately carried out in Rust after user direction. The behavioral recommendations in this document still apply.
 </research_summary>
 
 <standard_stack>

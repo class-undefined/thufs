@@ -12,7 +12,7 @@ The roadmap starts by locking down the command contract, configuration, and Seaf
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation and Command Contract** - Establish CLI structure, auth/config model, and path semantics.
+- [x] **Phase 1: Foundation and Command Contract** - Establish CLI structure, auth/config model, and path semantics.
 - [ ] **Phase 2: Listing and Transfer Core** - Deliver `ls`, `push`, and `pull` on top of the Seafile-backed client.
 - [ ] **Phase 3: Share Workflow** - Deliver `thufs share` with password and expiration support.
 - [ ] **Phase 4: Hardening and Release Readiness** - Lock in reliability, tests, docs, and packaging behavior for real shell use.
@@ -30,9 +30,9 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 3 plans
 
 Plans:
-- [ ] 01-01: Initialize Go CLI project structure and shared command/runtime plumbing
-- [ ] 01-02: Implement config and authentication handling for a single THU account
-- [ ] 01-03: Define and test command contract, output discipline, and path semantics
+- [x] 01-01: Initialize Rust CLI project structure and shared command/runtime plumbing
+- [x] 01-02: Implement config and authentication handling for a single THU account
+- [x] 01-03: Define and test command contract, output discipline, and path semantics
 
 ### Phase 2: Listing and Transfer Core
 **Goal**: Implement the core remote inspection and file transfer workflows that define v1 value.
@@ -86,7 +86,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation and Command Contract | 0/3 | Not started | - |
+| 1. Foundation and Command Contract | 3/3 | Complete | 2026-04-21 |
 | 2. Listing and Transfer Core | 0/4 | Not started | - |
 | 3. Share Workflow | 0/2 | Not started | - |
 | 4. Hardening and Release Readiness | 0/3 | Not started | - |
