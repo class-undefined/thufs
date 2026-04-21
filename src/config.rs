@@ -123,6 +123,11 @@ impl ConfigManager {
         &self.path
     }
 
+    #[allow(dead_code)]
+    pub fn load_resolved(&self) -> Result<Config> {
+        self.resolve().map(|(config, _)| config)
+    }
+
     pub fn resolve(&self) -> Result<(Config, EnvironmentOverrides)> {
         self.resolve_with_overrides(EnvironmentOverrides::from_process()?)
     }

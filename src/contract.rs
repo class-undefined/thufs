@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteRef {
     pub repo: String,
     pub path: String,
@@ -31,6 +32,27 @@ impl RemoteRef {
         }
 
         bail!("remote path must use repo:<library>/<path> when no default repo is configured")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRemoteRef {
+    pub repo_name: String,
+    pub repo_id: String,
+    pub path: String,
+}
+
+impl ResolvedRemoteRef {
+    pub fn new(
+        repo_name: impl Into<String>,
+        repo_id: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo_name: repo_name.into(),
+            repo_id: repo_id.into(),
+            path: path.into(),
+        }
     }
 }
 
@@ -86,5 +108,11 @@ mod tests {
             err.to_string().contains("remote path must use repo:"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn normalizes_redundant_path_segments() {
+        let remote = RemoteRef::parse("repo:course-lib//slides/./week1.pdf", None).expect("parse");
+        assert_eq!(remote.path, "/slides/week1.pdf");
     }
 }

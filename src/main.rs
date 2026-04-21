@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod contract;
 mod output;
+mod seafile;
 
 use anyhow::Result;
 use app::App;
