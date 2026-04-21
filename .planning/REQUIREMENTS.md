@@ -15,16 +15,16 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Navigation
 
-- [ ] **NAV-01**: User can list remote files and directories from THU Cloud Drive by path
-- [ ] **NAV-02**: User can distinguish files from directories in listing output
-- [ ] **NAV-03**: User can rely on `thufs ls` output in shell workflows without ambiguous failure states
+- [x] **NAV-01**: User can list remote files and directories from THU Cloud Drive by path
+- [x] **NAV-02**: User can distinguish files from directories in listing output
+- [x] **NAV-03**: User can rely on `thufs ls` output in shell workflows without ambiguous failure states
 
 ### Transfer
 
-- [ ] **XFER-01**: User can upload a local file to a remote THU Cloud Drive path with `thufs push`
-- [ ] **XFER-02**: User can download a remote file from THU Cloud Drive to a local path with `thufs pull`
-- [ ] **XFER-03**: User receives clear failure behavior when source paths, target paths, or overwrites are invalid
-- [ ] **XFER-04**: Transfer commands return exit codes suitable for automation
+- [x] **XFER-01**: User can upload a local file to a remote THU Cloud Drive path with `thufs push`
+- [x] **XFER-02**: User can download a remote file from THU Cloud Drive to a local path with `thufs pull`
+- [x] **XFER-03**: User receives clear failure behavior when source paths, target paths, or overwrites are invalid
+- [x] **XFER-04**: Transfer commands return exit codes suitable for automation
 
 ### Sharing
 
@@ -79,13 +79,13 @@ Deferred to future release. Tracked but not in current roadmap.
 | CLI-01 | Phase 1 | Complete |
 | CLI-02 | Phase 1 | Complete |
 | CLI-03 | Phase 1 | Complete |
-| NAV-01 | Phase 2 | Pending |
-| NAV-02 | Phase 2 | Pending |
-| NAV-03 | Phase 2 | Pending |
-| XFER-01 | Phase 2 | Pending |
-| XFER-02 | Phase 2 | Pending |
-| XFER-03 | Phase 2 | Pending |
-| XFER-04 | Phase 2 | Pending |
+| NAV-01 | Phase 2 | Complete |
+| NAV-02 | Phase 2 | Complete |
+| NAV-03 | Phase 2 | Complete |
+| XFER-01 | Phase 2 | Complete |
+| XFER-02 | Phase 2 | Complete |
+| XFER-03 | Phase 2 | Complete |
+| XFER-04 | Phase 2 | Complete |
 | SHARE-01 | Phase 3 | Pending |
 | SHARE-02 | Phase 3 | Pending |
 | SHARE-03 | Phase 3 | Pending |
@@ -98,4 +98,4 @@ Deferred to future release. Tracked but not in current roadmap.
 
 ---
 *Requirements defined: 2026-04-21*
-*Last updated: 2026-04-21 after initial definition*
+*Last updated: 2026-04-21 after Phase 2 execution*

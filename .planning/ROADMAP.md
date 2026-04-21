@@ -13,7 +13,7 @@ The roadmap starts by locking down the command contract, configuration, and Seaf
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation and Command Contract** - Establish CLI structure, auth/config model, and path semantics.
-- [ ] **Phase 2: Listing and Transfer Core** - Deliver `ls`, `push`, and `pull` on top of the Seafile-backed client.
+- [x] **Phase 2: Listing and Transfer Core** - Deliver `ls`, `push`, and `pull` on top of the Seafile-backed client.
 - [ ] **Phase 3: Share Workflow** - Deliver `thufs share` with password and expiration support.
 - [ ] **Phase 4: Hardening and Release Readiness** - Lock in reliability, tests, docs, and packaging behavior for real shell use.
 
@@ -45,10 +45,10 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 02-01: Implement Seafile repository and path resolution client operations
-- [ ] 02-02: Build `thufs ls` with stable output and failure semantics
-- [ ] 02-03: Build `thufs push` upload workflow and overwrite/path validation
-- [ ] 02-04: Build `thufs pull` download workflow and local write safety behavior
+- [x] 02-01: Implement Seafile repository and path resolution client operations
+- [x] 02-02: Build `thufs ls` with stable output and failure semantics
+- [x] 02-03: Build `thufs push` upload workflow and overwrite/path validation
+- [x] 02-04: Build `thufs pull` download workflow and local write safety behavior
 
 ### Phase 3: Share Workflow
 **Goal**: Add a share-link command that fits terminal workflows and exposes the intended v1 controls.
@@ -87,6 +87,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation and Command Contract | 3/3 | Complete | 2026-04-21 |
-| 2. Listing and Transfer Core | 0/4 | Not started | - |
+| 2. Listing and Transfer Core | 4/4 | Complete | 2026-04-21 |
 | 3. Share Workflow | 0/2 | Not started | - |
 | 4. Hardening and Release Readiness | 0/3 | Not started | - |
