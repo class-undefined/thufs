@@ -31,6 +31,13 @@ pub enum EntryKind {
     Dir,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedListTarget {
+    pub repo_name: String,
+    pub repo_id: String,
+    pub path: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SeafileClient {
@@ -74,6 +81,19 @@ impl SeafileClient {
             repo.id.clone(),
             remote.path.clone(),
         ))
+    }
+
+    pub fn resolve_list_target(
+        &self,
+        remote: &RemoteRef,
+        repos: &[Repository],
+    ) -> Result<ResolvedListTarget> {
+        let resolved = self.resolve_remote_ref(remote, repos)?;
+        Ok(ResolvedListTarget {
+            repo_name: resolved.repo_name,
+            repo_id: resolved.repo_id,
+            path: resolved.path,
+        })
     }
 
     pub fn find_repository<'a>(
