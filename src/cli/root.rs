@@ -1,6 +1,6 @@
 use clap::{Arg, ArgAction, Command};
 
-use super::{auth, config, list};
+use super::{auth, config, list, push};
 
 pub fn build_root_command() -> Command {
     Command::new("thufs")
@@ -18,6 +18,7 @@ Management verbs stay grouped under auth and config.",
                 .action(ArgAction::SetTrue),
         )
         .subcommand(list::build_command())
+        .subcommand(push::build_command())
         .subcommand(auth::build_command())
         .subcommand(config::build_command())
         .subcommand_required(false)

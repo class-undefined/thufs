@@ -1,18 +1,18 @@
 pub mod auth_service;
 pub mod list_service;
+pub mod push_service;
 
-#[allow(dead_code)]
 use crate::{config::ConfigManager, output::Renderer, seafile::SeafileClient};
 
 use self::auth_service::AuthService;
 use self::list_service::ListService;
+use self::push_service::PushService;
 
 pub struct App {
     pub renderer: Renderer,
     pub auth_service: AuthService,
-    #[allow(dead_code)]
-    pub seafile: SeafileClient,
     pub list_service: ListService,
+    pub push_service: PushService,
 }
 
 impl App {
@@ -22,9 +22,9 @@ impl App {
 
         Self {
             renderer: Renderer::new(),
-            auth_service: AuthService::new(config),
-            seafile: seafile.clone(),
-            list_service: ListService::new(seafile),
+            auth_service: AuthService::new(config.clone()),
+            list_service: ListService::new(seafile.clone()),
+            push_service: PushService::new(config.clone(), seafile.clone()),
         }
     }
 }
