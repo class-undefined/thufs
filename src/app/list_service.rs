@@ -82,11 +82,31 @@ impl ListService {
             };
             let mut line = format!("{kind} {rendered_path}");
             if let Some(size) = item.size {
-                line.push_str(&format!(" {size}"));
+                line.push_str(&format!(" {}", format_size(size)));
             }
             lines.push(line);
         }
         lines.join("\n")
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+
+    let mut value = bytes as f64;
+    let mut unit_index = 0usize;
+
+    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 {
+        format!("{bytes} {}", UNITS[unit_index])
+    } else if value >= 10.0 || (value.fract() - 0.0).abs() < f64::EPSILON {
+        format!("{value:.0} {}", UNITS[unit_index])
+    } else {
+        format!("{value:.1} {}", UNITS[unit_index])
     }
 }
 
@@ -207,6 +227,38 @@ mod tests {
         });
 
         assert!(rendered.contains("d /slides/week1"));
-        assert!(rendered.contains("f /slides/week1.pdf 42"));
+        assert!(rendered.contains("f /slides/week1.pdf 42 B"));
+    }
+
+    #[test]
+    fn human_render_adapts_size_units() {
+        let rendered = ListService::format_human(&super::ListResult {
+            repo: "course-lib".to_string(),
+            path: "/".to_string(),
+            items: vec![
+                super::ListItem {
+                    name: "tiny.bin".to_string(),
+                    path: "/tiny.bin".to_string(),
+                    kind: "file".to_string(),
+                    size: Some(512),
+                },
+                super::ListItem {
+                    name: "medium.bin".to_string(),
+                    path: "/medium.bin".to_string(),
+                    kind: "file".to_string(),
+                    size: Some(2 * 1024),
+                },
+                super::ListItem {
+                    name: "large.bin".to_string(),
+                    path: "/large.bin".to_string(),
+                    kind: "file".to_string(),
+                    size: Some(1536 * 1024),
+                },
+            ],
+        });
+
+        assert!(rendered.contains("f /tiny.bin 512 B"));
+        assert!(rendered.contains("f /medium.bin 2 KB"));
+        assert!(rendered.contains("f /large.bin 1.5 MB"));
     }
 }
