@@ -20,6 +20,29 @@ pub struct Repository {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountInfo {
+    #[serde(default)]
+    pub login_id: Option<String>,
+    #[serde(default)]
+    pub is_staff: Option<bool>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub email: String,
+    #[serde(default)]
+    pub contact_email: Option<String>,
+    #[serde(default)]
+    pub institution: Option<String>,
+    #[serde(default)]
+    pub department: Option<String>,
+    #[serde(default)]
+    pub space_usage: Option<String>,
+    #[serde(default)]
+    pub usage: Option<u64>,
+    #[serde(default)]
+    pub total: Option<u64>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectoryEntry {
@@ -160,6 +183,26 @@ impl SeafileClient {
                 .json::<Vec<Repository>>()
                 .await
                 .context("failed to parse repository list")
+        })
+    }
+
+    pub fn get_account_info(&self) -> Result<AccountInfo> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            let response = self
+                .http
+                .get(format!("{}/api2/account/info/", self.base_url()))
+                .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .send()
+                .await
+                .context("failed to request account info")?
+                .error_for_status()
+                .context("account info request failed")?;
+
+            response
+                .json::<AccountInfo>()
+                .await
+                .context("failed to parse account info")
         })
     }
 

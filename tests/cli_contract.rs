@@ -9,7 +9,11 @@ fn root_help_shows_grouped_management_commands() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("push, pull, ls, and share"))
+        .stdout(predicate::str::contains(
+            "info, repos, ls, push, pull, and share",
+        ))
+        .stdout(predicate::str::contains("info"))
+        .stdout(predicate::str::contains("repos"))
         .stdout(predicate::str::contains("auth"))
         .stdout(predicate::str::contains("config"));
 }

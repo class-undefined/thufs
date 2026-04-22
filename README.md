@@ -1,6 +1,6 @@
 # thufs
 
-`thufs` is a shell-first CLI for THU Cloud Drive users who want predictable terminal workflows instead of sync-heavy desktop behavior. It is intentionally THU-only, single-account, and focused on four flat business verbs: `ls`, `push`, `pull`, and `share`.
+`thufs` is a shell-first CLI for THU Cloud Drive users who want predictable terminal workflows instead of sync-heavy desktop behavior. It is intentionally THU-only, single-account, and focused on flat business verbs such as `info`, `repos`, `ls`, `push`, `pull`, and `share`.
 
 ## Install
 
@@ -65,6 +65,21 @@ List a remote directory:
 ```bash
 thufs ls repo:course-lib/slides
 thufs --json ls repo:course-lib/slides
+```
+
+Show the current token's account information:
+
+```bash
+thufs info
+thufs --json info
+```
+
+List visible repositories or libraries:
+
+```bash
+thufs repos
+thufs libraries
+thufs --json repos
 ```
 
 Upload a single local file:
