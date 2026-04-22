@@ -1,6 +1,6 @@
 # thufs
 
-`thufs` is a shell-first CLI for THU Cloud Drive users who want predictable terminal workflows instead of sync-heavy desktop behavior. It is intentionally THU-only, single-account, and focused on flat business verbs such as `info`, `repos`, `ls`, `push`, `pull`, and `share`.
+`thufs` is a shell-first CLI for THU Cloud Drive users who want predictable terminal workflows instead of sync-heavy desktop behavior. It is intentionally THU-only, single-account, and focused on flat business verbs such as `info`, `repos`, `ls`, `upload`, `download`, and `share`.
 
 ## Install
 
@@ -85,16 +85,36 @@ thufs --json repos
 Upload a single local file:
 
 ```bash
-thufs push ./report.pdf repo:course-lib/submissions/report.pdf
-thufs push --overwrite ./report.pdf repo:course-lib/submissions/report.pdf
+thufs upload ./report.pdf repo:course-lib/submissions/report.pdf
+thufs upload --overwrite ./report.pdf repo:course-lib/submissions/report.pdf
+thufs upload --rename ./report.pdf repo:course-lib/submissions/report.pdf
 ```
 
 Download a single remote file:
 
 ```bash
-thufs pull repo:course-lib/slides/week1.pdf ./week1.pdf
-thufs pull --overwrite repo:course-lib/slides/week1.pdf ./week1.pdf
+thufs download repo:course-lib/slides/week1.pdf
+thufs download repo:course-lib/slides/week1.pdf ./week1.pdf
+thufs download --overwrite repo:course-lib/slides/week1.pdf ./week1.pdf
+thufs download --rename repo:course-lib/slides/week1.pdf ./week1.pdf
 ```
+
+If `download` omits the local path, `thufs` saves into the current directory using the remote file name.
+
+`upload` and `download` support these conflict controls:
+
+- `--overwrite` replace the existing target
+- `--rename` choose a unique sibling name
+- `--fail` fail immediately instead of prompting
+
+In an interactive terminal, if none of these flags are provided and the target already exists, `thufs` prompts for overwrite or rename. In non-interactive mode, pass one of the flags explicitly.
+
+## Transfer UX
+
+- `upload` and `download` show a progress bar when stderr is a TTY.
+- `push` and `pull` remain supported as compatibility aliases for `upload` and `download`.
+- `download` resumes from an existing partial `.thufs-part` file using HTTP range requests when the server supports it.
+- `upload` performs a best-effort resumable upload against Seafile's documented uploaded-bytes mechanism.
 
 Create a share link:
 

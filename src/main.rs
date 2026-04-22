@@ -4,6 +4,7 @@ mod config;
 mod contract;
 mod output;
 mod seafile;
+mod transfer;
 
 use anyhow::Result;
 use app::App;

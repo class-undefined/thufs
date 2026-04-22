@@ -10,10 +10,12 @@ fn root_help_shows_grouped_management_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "info, repos, ls, push, pull, and share",
+            "info, repos, ls, upload, download, and share",
         ))
         .stdout(predicate::str::contains("info"))
         .stdout(predicate::str::contains("repos"))
+        .stdout(predicate::str::contains("upload"))
+        .stdout(predicate::str::contains("download"))
         .stdout(predicate::str::contains("auth"))
         .stdout(predicate::str::contains("config"));
 }

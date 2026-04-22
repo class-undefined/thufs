@@ -5,6 +5,7 @@ use crate::{
     config::ConfigManager,
     contract::RemoteRef,
     seafile::{DirectoryEntry, EntryKind, SeafileClient},
+    transfer::format_size,
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -87,26 +88,6 @@ impl ListService {
             lines.push(line);
         }
         lines.join("\n")
-    }
-}
-
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-
-    let mut value = bytes as f64;
-    let mut unit_index = 0usize;
-
-    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit_index += 1;
-    }
-
-    if unit_index == 0 {
-        format!("{bytes} {}", UNITS[unit_index])
-    } else if value >= 10.0 || (value.fract() - 0.0).abs() < f64::EPSILON {
-        format!("{value:.0} {}", UNITS[unit_index])
-    } else {
-        format!("{value:.1} {}", UNITS[unit_index])
     }
 }
 

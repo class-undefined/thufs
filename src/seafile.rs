@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::StreamExt;
 use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,6 +10,7 @@ use tokio::{fs, io::AsyncWriteExt, runtime::Runtime};
 use crate::{
     config::ConfigManager,
     contract::{RemoteRef, ResolvedRemoteRef},
+    transfer::create_progress_bar,
 };
 
 const THU_CLOUD_BASE_URL: &str = "https://cloud.tsinghua.edu.cn";
@@ -257,28 +259,55 @@ impl SeafileClient {
         parent_dir: &str,
         target_name: &str,
         replace: bool,
+        total_bytes: u64,
     ) -> Result<UploadedFile> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
+            let uploaded_bytes = self
+                .uploaded_bytes(upload_link, parent_dir, target_name)
+                .await
+                .unwrap_or(0);
             let content = fs::read(local_path)
                 .await
                 .with_context(|| format!("failed to read {}", local_path.display()))?;
-            let part = reqwest::multipart::Part::bytes(content).file_name(target_name.to_string());
+            let start = uploaded_bytes.min(content.len() as u64) as usize;
+            let part = reqwest::multipart::Part::bytes(content[start..].to_vec())
+                .file_name(target_name.to_string());
             let form = reqwest::multipart::Form::new()
                 .part("file", part)
                 .text("parent_dir", parent_dir.to_string())
-                .text("replace", if replace { "1" } else { "0" }.to_string());
+                .text("replace", if replace { "1" } else { "0" }.to_string())
+                .text("file_name", target_name.to_string());
+
+            let progress = create_progress_bar(Some(total_bytes));
+            if let Some(progress) = &progress {
+                progress.set_position(uploaded_bytes);
+                progress.set_message(format!("upload {}", local_path.display()));
+            }
 
             let response = self
                 .http
                 .post(format!("{upload_link}?ret-json=1"))
                 .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .header(
+                    "Content-Range",
+                    format!(
+                        "bytes {}-{}/{}",
+                        start,
+                        content.len().saturating_sub(1),
+                        content.len()
+                    ),
+                )
                 .multipart(form)
                 .send()
                 .await
                 .context("failed to upload file")?
                 .error_for_status()
                 .context("upload request failed")?;
+
+            if let Some(progress) = &progress {
+                progress.finish_with_message(format!("upload {} complete", local_path.display()));
+            }
 
             let uploaded = response
                 .json::<Vec<UploadedFile>>()
@@ -296,6 +325,7 @@ impl SeafileClient {
         update_link: &str,
         local_path: &Path,
         target_file: &str,
+        total_bytes: u64,
     ) -> Result<UploadedFile> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
@@ -312,6 +342,12 @@ impl SeafileClient {
                 .part("file", part)
                 .text("target_file", target_file.to_string());
 
+            let progress = create_progress_bar(Some(total_bytes));
+            if let Some(progress) = &progress {
+                progress.set_position(0);
+                progress.set_message(format!("upload {}", local_path.display()));
+            }
+
             let response = self
                 .http
                 .post(update_link)
@@ -322,6 +358,10 @@ impl SeafileClient {
                 .context("failed to update file")?
                 .error_for_status()
                 .context("update request failed")?;
+
+            if let Some(progress) = &progress {
+                progress.finish_with_message(format!("upload {} complete", local_path.display()));
+            }
 
             let uploaded = response
                 .json::<Vec<UploadedFile>>()
@@ -338,30 +378,93 @@ impl SeafileClient {
     pub fn download_file(&self, download_link: &str, destination: &Path) -> Result<u64> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
+            let existing_bytes = fs::metadata(destination)
+                .await
+                .map(|meta| meta.len())
+                .unwrap_or(0);
             let response = self
                 .http
                 .get(download_link)
+                .header(header::RANGE, format!("bytes={existing_bytes}-"))
                 .send()
                 .await
                 .context("failed to download file body")?
                 .error_for_status()
                 .context("download request failed")?;
 
-            let bytes = response
-                .bytes()
-                .await
-                .context("failed to read download body")?;
-            let mut file = fs::File::create(destination)
-                .await
-                .with_context(|| format!("failed to create {}", destination.display()))?;
-            file.write_all(&bytes)
-                .await
-                .with_context(|| format!("failed to write {}", destination.display()))?;
+            let total = response.content_length().map(|len| len + existing_bytes);
+            let progress = create_progress_bar(total);
+            if let Some(progress) = &progress {
+                progress.set_position(existing_bytes);
+                progress.set_message(format!("download {}", destination.display()));
+            }
+
+            let mut stream = response.bytes_stream();
+            let mut file = if existing_bytes > 0 {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(destination)
+                    .await
+                    .with_context(|| format!("failed to open {}", destination.display()))?
+            } else {
+                fs::File::create(destination)
+                    .await
+                    .with_context(|| format!("failed to create {}", destination.display()))?
+            };
+
+            let mut written = existing_bytes;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.context("failed to read download body")?;
+                file.write_all(&chunk)
+                    .await
+                    .with_context(|| format!("failed to write {}", destination.display()))?;
+                written += chunk.len() as u64;
+                if let Some(progress) = &progress {
+                    progress.set_position(written);
+                }
+            }
+
             file.flush()
                 .await
                 .with_context(|| format!("failed to flush {}", destination.display()))?;
-            Ok(bytes.len() as u64)
+            if let Some(progress) = &progress {
+                progress
+                    .finish_with_message(format!("download {} complete", destination.display()));
+            }
+            Ok(written)
         })
+    }
+
+    async fn uploaded_bytes(
+        &self,
+        upload_link: &str,
+        parent_dir: &str,
+        file_name: &str,
+    ) -> Result<u64> {
+        let response = self
+            .http
+            .get(upload_link)
+            .header(header::AUTHORIZATION, self.auth_header_value()?)
+            .query(&[
+                ("parent_dir", parent_dir),
+                ("file_name", file_name),
+                ("ret-json", "1"),
+            ])
+            .send()
+            .await
+            .context("failed to inspect uploaded bytes")?
+            .error_for_status()
+            .context("uploaded-bytes request failed")?;
+
+        let payload = response
+            .json::<Value>()
+            .await
+            .context("failed to parse uploaded-bytes response")?;
+
+        Ok(payload
+            .get("file-uploaded-bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0))
     }
 
     pub fn create_share_link(&self, request: ShareLinkRequest) -> Result<ShareLink> {

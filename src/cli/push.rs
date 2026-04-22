@@ -6,8 +6,9 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use crate::app::App;
 
 pub fn build_command() -> Command {
-    Command::new("push")
+    Command::new("upload")
         .about("Upload a local file to THU Cloud Drive")
+        .visible_alias("push")
         .arg(Arg::new("local").help("Local source file").required(true))
         .arg(
             Arg::new("remote")
@@ -18,6 +19,20 @@ pub fn build_command() -> Command {
             Arg::new("overwrite")
                 .long("overwrite")
                 .help("Replace the remote file if it already exists")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("rename")
+                .long("rename")
+                .help("Pick a unique remote name instead of overwriting")
+                .conflicts_with("overwrite")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("fail")
+                .long("fail")
+                .help("Fail immediately if the remote file already exists")
+                .conflicts_with_all(["overwrite", "rename"])
                 .action(ArgAction::SetTrue),
         )
 }
@@ -31,9 +46,17 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
     let remote = matches
         .get_one::<String>("remote")
         .expect("required by clap");
-    let overwrite = matches.get_flag("overwrite");
+    let conflict_policy = if matches.get_flag("overwrite") {
+        crate::transfer::ConflictPolicy::Overwrite
+    } else if matches.get_flag("rename") {
+        crate::transfer::ConflictPolicy::Rename
+    } else if matches.get_flag("fail") {
+        crate::transfer::ConflictPolicy::Fail
+    } else {
+        crate::transfer::ConflictPolicy::Prompt
+    };
 
-    let result = app.push_service.push(&local, remote, overwrite)?;
+    let result = app.push_service.push(&local, remote, conflict_policy)?;
     let mut stdout = std::io::stdout();
     if matches.get_flag("json") {
         app.renderer.write_json(&mut stdout, &result)?;
@@ -45,7 +68,9 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
                 result.local_path,
                 result.repo,
                 result.remote_path,
-                if result.overwritten {
+                if result.renamed {
+                    "renamed"
+                } else if result.overwritten {
                     "overwritten"
                 } else {
                     "created"

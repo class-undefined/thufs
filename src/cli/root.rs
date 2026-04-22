@@ -7,7 +7,7 @@ pub fn build_root_command() -> Command {
         .about("THU Cloud Drive CLI for shell-first file workflows")
         .long_about(
             "thufs keeps daily THU Cloud Drive work compact in the terminal.\n\n\
-Business verbs stay flat and scriptable: info, repos, ls, push, pull, and share.\n\
+Business verbs stay flat and scriptable: info, repos, ls, upload, download, and share.\n\
 Management verbs stay grouped under auth and config.",
         )
         .arg(
