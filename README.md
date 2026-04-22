@@ -397,15 +397,6 @@ echo "saved to: $FINAL_PATH"
 cargo test
 ```
 
-本地真实服务端到端测试需要显式确认后手动执行：
-
-```bash
-export THUFS_TOKEN="<seafile-api-token>"
-THUFS_E2E=1 scripts/e2e-local.sh
-```
-
-该脚本会创建一个带时间戳的测试 library，执行 `info`、`repos`、`mkrepo`、`mkdir`、`upload`、`ls`、`share`、`unshare`、`download`，并校验下载内容与上传内容一致。由于它会访问真实清华云盘服务，默认拒绝运行。
-
 格式化代码：
 
 ```bash
@@ -423,7 +414,6 @@ cargo run -- download --help
 ## 已知说明
 
 - 当前实现基于 Seafile API 形态
-- 在正式广泛发布前，仍建议结合真实清华云盘账号进行端到端验证
 - 某些服务端细节可能会因实际部署差异而存在边界行为
 
 ## License

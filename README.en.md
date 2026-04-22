@@ -330,15 +330,6 @@ Run tests:
 cargo test
 ```
 
-The real-service end-to-end flow must be explicitly enabled before running locally:
-
-```bash
-export THUFS_TOKEN="<seafile-api-token>"
-THUFS_E2E=1 scripts/e2e-local.sh
-```
-
-The script creates an isolated timestamped test library and runs `info`, `repos`, `mkrepo`, `mkdir`, `upload`, `ls`, `share`, `unshare`, and `download`, then verifies that the downloaded content matches the uploaded content. It refuses to run unless explicitly enabled because it touches the real THU Cloud Drive service.
-
 Format code:
 
 ```bash

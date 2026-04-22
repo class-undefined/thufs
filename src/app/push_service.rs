@@ -317,13 +317,10 @@ mod tests {
 
     #[test]
     fn rejects_missing_local_source() {
-        let (_temp, service) = make_service();
+        let (temp, service) = make_service();
+        let missing = temp.path().join("missing.txt");
         let err = service
-            .push(
-                PathBuf::from("/definitely/missing").as_path(),
-                "repo:course-lib/a.txt",
-                ConflictPolicy::Fail,
-            )
+            .push(&missing, "repo:course-lib/a.txt", ConflictPolicy::Fail)
             .expect_err("should fail");
         assert!(err.to_string().contains("does not exist"));
     }
@@ -359,7 +356,7 @@ mod tests {
     fn upload_target_can_use_repo_root_and_local_filename() {
         let remote = super::parse_upload_target(
             "repo:course-lib",
-            PathBuf::from("/tmp/report.pdf").as_path(),
+            PathBuf::from("report.pdf").as_path(),
             None,
         )
         .expect("parse");
@@ -372,7 +369,7 @@ mod tests {
     fn upload_target_can_use_default_repo_directory_and_local_filename() {
         let remote = super::parse_upload_target(
             "submissions/",
-            PathBuf::from("/tmp/report.pdf").as_path(),
+            PathBuf::from("report.pdf").as_path(),
             Some("course-lib"),
         )
         .expect("parse");
