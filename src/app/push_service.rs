@@ -223,9 +223,9 @@ fn next_available_name(target_name: &str, entries: &[crate::seafile::DirectoryEn
     let mut index = 1usize;
     loop {
         let candidate = if ext.is_empty() {
-            format!("{stem} ({index})")
+            format!("{stem}-({index})")
         } else {
-            format!("{stem} ({index}).{ext}")
+            format!("{stem}-({index}).{ext}")
         };
         if !entries.iter().any(|entry| entry.name == candidate) {
             return candidate;
@@ -313,6 +313,19 @@ mod tests {
     fn split_filename_preserves_extension() {
         assert_eq!(super::split_filename("report.pdf"), ("report", "pdf"));
         assert_eq!(super::split_filename("archive"), ("archive", ""));
+    }
+
+    #[test]
+    fn next_available_name_uses_dash_number_pattern() {
+        let entries = vec![crate::seafile::DirectoryEntry {
+            name: "report.pdf".to_string(),
+            path: "/report.pdf".to_string(),
+            kind: crate::seafile::EntryKind::File,
+            size: Some(1),
+        }];
+
+        let renamed = super::next_available_name("report.pdf", &entries);
+        assert_eq!(renamed, "report-(1).pdf");
     }
 
     #[test]

@@ -150,9 +150,9 @@ fn next_available_local_path(path: &Path) -> PathBuf {
     let mut index = 1usize;
     loop {
         let candidate = if ext.is_empty() {
-            format!("{stem} ({index})")
+            format!("{stem}-({index})")
         } else {
-            format!("{stem} ({index}).{ext}")
+            format!("{stem}-({index}).{ext}")
         };
         let candidate_path = parent.join(candidate);
         if !candidate_path.exists() {
@@ -231,6 +231,6 @@ mod tests {
         let existing = temp.path().join("week1.pdf");
         std::fs::write(&existing, "data").expect("write");
         let renamed = next_available_local_path(&existing);
-        assert!(renamed.ends_with("week1 (1).pdf"));
+        assert!(renamed.ends_with("week1-(1).pdf"));
     }
 }
