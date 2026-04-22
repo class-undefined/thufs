@@ -16,6 +16,31 @@ fn share_help_is_available() {
 }
 
 #[test]
+fn unshare_help_is_available() {
+    Command::cargo_bin("thufs")
+        .expect("binary")
+        .args(["unshare", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Delete a THU Cloud Drive share link",
+        ));
+}
+
+#[test]
+fn shares_help_is_available() {
+    Command::cargo_bin("thufs")
+        .expect("binary")
+        .args(["shares", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("List THU Cloud Drive share links"))
+        .stdout(predicate::str::contains("--page"))
+        .stdout(predicate::str::contains("--per-page"))
+        .stdout(predicate::str::contains("--all"));
+}
+
+#[test]
 fn share_rejects_zero_day_expiration_before_network() {
     Command::cargo_bin("thufs")
         .expect("binary")

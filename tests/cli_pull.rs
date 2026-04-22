@@ -9,11 +9,14 @@ fn download_help_is_available() {
         .args(["download", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Download a remote file"));
+        .stdout(predicate::str::contains("Download a remote file"))
+        .stdout(predicate::str::contains("--conflict"))
+        .stdout(predicate::str::contains("--mode"))
+        .stdout(predicate::str::contains("--workers"));
 }
 
 #[test]
-fn download_fails_when_local_destination_exists_without_policy() {
+fn download_fails_when_local_destination_exists_with_fail_policy() {
     let temp = tempdir().expect("tempdir");
     let destination = temp.path().join("existing.txt");
     std::fs::write(&destination, "content").expect("write");
@@ -24,13 +27,13 @@ fn download_fails_when_local_destination_exists_without_policy() {
         .args([
             "download",
             "slides/week1.pdf",
+            "--conflict",
+            "fail",
             destination.to_str().expect("utf8"),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "requires --overwrite, --rename, or --fail",
-        ));
+        .stderr(predicate::str::contains("already exists"));
 }
 
 #[test]

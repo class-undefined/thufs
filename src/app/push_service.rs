@@ -16,11 +16,15 @@ use crate::{
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PushResult {
     pub repo: String,
+    pub requested_remote_path: String,
+    pub final_remote_path: String,
     pub remote_path: String,
+    pub local_name: String,
     pub local_path: String,
+    pub remote_name: String,
     pub size: u64,
     pub overwritten: bool,
-    pub renamed: bool,
+    pub uniquified: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -40,12 +44,25 @@ impl PushService {
         let resolved_config = self.config.load_resolved()?;
         let remote = parse_upload_target(remote, local, resolved_config.default_repo.as_deref())?;
         let repositories = self.client.list_repositories()?;
-        let resolved = self.client.resolve_remote_ref(&remote, &repositories)?;
+        let repository = repositories
+            .iter()
+            .find(|repo| repo.name == remote.repo)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| self.client.create_repository(&remote.repo))?;
+        let resolved = crate::contract::ResolvedRemoteRef::new(
+            repository.name.clone(),
+            repository.id.clone(),
+            remote.path.clone(),
+        );
 
         let (parent_dir, target_name) = split_parent_and_name(&resolved.path)?;
+        self.client
+            .ensure_directory(&resolved.repo_id, parent_dir)?;
         let entries = self
             .client
             .list_directory_entries(&resolved.repo_id, parent_dir)?;
+        let requested_remote_path = resolved.path.clone();
         let mut final_remote_path = resolved.path.clone();
         let mut final_target_name = target_name.to_string();
         let existing = entries
@@ -53,7 +70,7 @@ impl PushService {
             .find(|entry| entry.name == target_name)
             .cloned();
         let mut overwritten = false;
-        let mut renamed = false;
+        let mut uniquified = false;
 
         let metadata = std::fs::metadata(local)
             .with_context(|| format!("failed to inspect {}", local.display()))?;
@@ -75,10 +92,10 @@ impl PushService {
                             metadata.len(),
                         )?
                     }
-                    ConflictPolicy::Rename => {
+                    ConflictPolicy::Uniquify => {
                         final_target_name = next_available_name(target_name, &entries);
                         final_remote_path = join_remote_path(parent_dir, &final_target_name);
-                        renamed = true;
+                        uniquified = true;
                         let upload_link =
                             self.client.get_upload_link(&resolved.repo_id, parent_dir)?;
                         self.client.upload_file(
@@ -93,7 +110,7 @@ impl PushService {
                     }
                     ConflictPolicy::Fail | ConflictPolicy::Prompt => {
                         bail!(
-                            "remote target `{}` already exists; rerun with --overwrite or --rename",
+                            "remote target `{}` already exists; rerun with --conflict overwrite, --conflict uniquify, or --conflict fail",
                             resolved.path
                         );
                     }
@@ -115,11 +132,15 @@ impl PushService {
 
         Ok(PushResult {
             repo: resolved.repo_name,
+            requested_remote_path,
+            final_remote_path: final_remote_path.clone(),
             remote_path: final_remote_path,
+            local_name: file_name(local)?,
             local_path: local.display().to_string(),
+            remote_name: final_target_name,
             size: uploaded.size.unwrap_or(metadata.len()),
             overwritten,
-            renamed,
+            uniquified,
         })
     }
 
@@ -145,6 +166,13 @@ fn split_parent_and_name(path: &str) -> Result<(&str, &str)> {
     }
     let parent = if idx == 0 { "/" } else { &normalized[..idx] };
     Ok((parent, name))
+}
+
+fn file_name(path: &Path) -> Result<String> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("path `{}` has invalid filename", path.display()))
 }
 
 fn parse_upload_target(
@@ -247,25 +275,16 @@ fn resolve_conflict_policy(policy: ConflictPolicy, path: &str) -> Result<Conflic
     }
 
     let stderr = std::io::stderr();
-    if !stderr.is_terminal() {
-        return Ok(ConflictPolicy::Rename);
+    if stderr.is_terminal() {
+        let mut stderr = stderr.lock();
+        writeln!(
+            stderr,
+            "Remote file `{path}` already exists. Defaulting to uniquify; use --conflict to override."
+        )?;
+        stderr.flush()?;
     }
 
-    let mut stderr = stderr.lock();
-    writeln!(
-        stderr,
-        "Remote file `{path}` already exists. [o]verwrite, [r]ename, [f]ail?"
-    )?;
-    stderr.flush()?;
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    match input.trim().to_ascii_lowercase().as_str() {
-        "o" | "overwrite" => Ok(ConflictPolicy::Overwrite),
-        "r" | "rename" => Ok(ConflictPolicy::Rename),
-        "f" | "fail" | "" => Ok(ConflictPolicy::Fail),
-        _ => bail!("unrecognized conflict choice"),
-    }
+    Ok(ConflictPolicy::Uniquify)
 }
 
 #[cfg(test)]
@@ -322,10 +341,18 @@ mod tests {
             path: "/report.pdf".to_string(),
             kind: crate::seafile::EntryKind::File,
             size: Some(1),
+            updated_at: None,
         }];
 
         let renamed = super::next_available_name("report.pdf", &entries);
         assert_eq!(renamed, "report-(1).pdf");
+    }
+
+    #[test]
+    fn prompt_policy_defaults_to_uniquify() {
+        let resolved =
+            super::resolve_conflict_policy(ConflictPolicy::Prompt, "/report.pdf").expect("resolve");
+        assert_eq!(resolved, ConflictPolicy::Uniquify);
     }
 
     #[test]

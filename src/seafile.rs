@@ -2,24 +2,32 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
-use reqwest::{Client, header};
+use futures_util::future::try_join_all;
+use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{fs, io::AsyncWriteExt, runtime::Runtime};
+use tokio::{
+    fs,
+    io::{self, AsyncWriteExt},
+    runtime::Runtime,
+};
 
 use crate::{
     config::ConfigManager,
     contract::{RemoteRef, ResolvedRemoteRef},
-    transfer::create_progress_bar,
+    transfer::{DownloadMode, create_progress_bar},
 };
 
 const THU_CLOUD_BASE_URL: &str = "https://cloud.tsinghua.edu.cn";
+const PARALLEL_DOWNLOAD_THRESHOLD: u64 = 8 * 1024 * 1024;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Repository {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub mtime: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,6 +60,7 @@ pub struct DirectoryEntry {
     pub path: String,
     pub kind: EntryKind,
     pub size: Option<u64>,
+    pub updated_at: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -76,6 +85,26 @@ pub struct UploadedFile {
     pub size: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CreatedRepository {
+    pub repo_id: String,
+    pub repo_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileDetail {
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default)]
+    pub mtime: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DirectoryDetail {
+    #[serde(default)]
+    pub mtime: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareLinkRequest {
     pub repo_id: String,
@@ -86,11 +115,32 @@ pub struct ShareLinkRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShareLink {
-    pub link: String,
+    #[serde(default)]
+    pub link: Option<String>,
     pub token: Option<String>,
     pub path: Option<String>,
     #[serde(default)]
+    pub repo_id: Option<String>,
+    #[serde(default)]
+    pub repo_name: Option<String>,
+    #[serde(default)]
+    pub obj_name: Option<String>,
+    #[serde(default)]
+    pub is_dir: Option<bool>,
+    #[serde(default)]
+    pub ctime: Option<String>,
+    #[serde(default)]
+    pub expire_date: Option<String>,
+    #[serde(default)]
+    pub view_cnt: Option<u64>,
+    #[serde(default)]
     pub expire_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DownloadSupport {
+    total_bytes: u64,
+    accepts_ranges: bool,
 }
 
 #[allow(dead_code)]
@@ -188,6 +238,31 @@ impl SeafileClient {
         })
     }
 
+    pub fn create_repository(&self, name: &str) -> Result<Repository> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            let created = self
+                .http
+                .post(format!("{}/api2/repos/", self.base_url()))
+                .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .form(&[("name", name)])
+                .send()
+                .await
+                .context("failed to create repository")?
+                .error_for_status()
+                .context("repository creation failed")?
+                .json::<CreatedRepository>()
+                .await
+                .context("failed to parse repository creation response")?;
+
+            Ok(Repository {
+                id: created.repo_id,
+                name: created.repo_name,
+                mtime: None,
+            })
+        })
+    }
+
     pub fn get_account_info(&self) -> Result<AccountInfo> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
@@ -209,6 +284,15 @@ impl SeafileClient {
     }
 
     pub fn list_directory_entries(&self, repo_id: &str, path: &str) -> Result<Vec<DirectoryEntry>> {
+        self.list_directory_entries_with_time(repo_id, path, true)
+    }
+
+    pub fn list_directory_entries_with_time(
+        &self,
+        repo_id: &str,
+        path: &str,
+        show_time: bool,
+    ) -> Result<Vec<DirectoryEntry>> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
             let response = self
@@ -226,7 +310,37 @@ impl SeafileClient {
                 .json::<Value>()
                 .await
                 .context("failed to decode directory listing")?;
-            parse_directory_entries(path, payload)
+            let mut entries = parse_directory_entries(path, payload)?;
+            if show_time {
+                for entry in &mut entries {
+                    entry.updated_at = match entry.kind {
+                        EntryKind::File => self.get_file_updated_at(repo_id, &entry.path).await?,
+                        EntryKind::Dir => self.get_dir_updated_at(repo_id, &entry.path).await?,
+                    };
+                }
+            }
+            Ok(entries)
+        })
+    }
+
+    pub fn ensure_directory(&self, repo_id: &str, path: &str) -> Result<()> {
+        if path == "/" || path.trim().is_empty() {
+            return Ok(());
+        }
+
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            self.http
+                .post(format!("{}/api2/repos/{repo_id}/dir/", self.base_url()))
+                .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .query(&[("p", path)])
+                .form(&[("operation", "mkdir"), ("create_parents", "true")])
+                .send()
+                .await
+                .context("failed to create remote directory")?
+                .error_for_status()
+                .context("remote directory creation failed")?;
+            Ok(())
         })
     }
 
@@ -398,64 +512,261 @@ impl SeafileClient {
     }
 
     #[allow(dead_code)]
-    pub fn download_file(&self, download_link: &str, destination: &Path) -> Result<u64> {
+    pub fn download_file(
+        &self,
+        download_link: &str,
+        destination: &Path,
+        mode: DownloadMode,
+        workers: usize,
+    ) -> Result<u64> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
             let existing_bytes = fs::metadata(destination)
                 .await
                 .map(|meta| meta.len())
                 .unwrap_or(0);
-            let response = self
-                .http
-                .get(download_link)
-                .header(header::RANGE, format!("bytes={existing_bytes}-"))
-                .send()
-                .await
-                .context("failed to download file body")?
-                .error_for_status()
-                .context("download request failed")?;
+            let workers = workers.max(1);
 
-            let total = response.content_length().map(|len| len + existing_bytes);
-            let progress = create_progress_bar(total);
-            if let Some(progress) = &progress {
-                progress.set_position(existing_bytes);
-                progress.set_message(format!("download {}", destination.display()));
-            }
+            match mode {
+                DownloadMode::Sequential => {}
+                DownloadMode::Auto | DownloadMode::Parallel => {
+                    if existing_bytes == 0
+                        && let Some(support) = self.probe_download_support(download_link).await?
+                        && support.accepts_ranges
+                    {
+                        if support.total_bytes >= PARALLEL_DOWNLOAD_THRESHOLD {
+                            return self
+                                .download_file_parallel(
+                                    download_link,
+                                    destination,
+                                    support.total_bytes,
+                                    workers,
+                                )
+                                .await;
+                        }
+                    } else if mode == DownloadMode::Parallel {
+                        bail!(
+                            "parallel download was requested but the remote endpoint does not support ranged download"
+                        );
+                    }
 
-            let mut stream = response.bytes_stream();
-            let mut file = if existing_bytes > 0 {
-                fs::OpenOptions::new()
-                    .append(true)
-                    .open(destination)
-                    .await
-                    .with_context(|| format!("failed to open {}", destination.display()))?
-            } else {
-                fs::File::create(destination)
-                    .await
-                    .with_context(|| format!("failed to create {}", destination.display()))?
-            };
-
-            let mut written = existing_bytes;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.context("failed to read download body")?;
-                file.write_all(&chunk)
-                    .await
-                    .with_context(|| format!("failed to write {}", destination.display()))?;
-                written += chunk.len() as u64;
-                if let Some(progress) = &progress {
-                    progress.set_position(written);
+                    if mode == DownloadMode::Parallel && existing_bytes > 0 {
+                        bail!(
+                            "parallel download was requested but resumable partial files must continue in sequential mode"
+                        );
+                    }
                 }
             }
 
-            file.flush()
+            self.download_file_sequential(download_link, destination, existing_bytes)
                 .await
-                .with_context(|| format!("failed to flush {}", destination.display()))?;
-            if let Some(progress) = &progress {
-                progress
-                    .finish_with_message(format!("download {} complete", destination.display()));
-            }
-            Ok(written)
         })
+    }
+
+    async fn probe_download_support(&self, download_link: &str) -> Result<Option<DownloadSupport>> {
+        let response = self
+            .http
+            .get(download_link)
+            .header(header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .context("failed to probe download range support")?;
+
+        if response.status() == StatusCode::PARTIAL_CONTENT {
+            let total_bytes = response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_total_bytes_from_content_range)
+                .or_else(|| response.content_length())
+                .ok_or_else(|| anyhow!("range probe did not include total content length"))?;
+
+            return Ok(Some(DownloadSupport {
+                total_bytes,
+                accepts_ranges: true,
+            }));
+        }
+
+        if response.status().is_success() {
+            let total_bytes = response.content_length().unwrap_or(0);
+            return Ok(Some(DownloadSupport {
+                total_bytes,
+                accepts_ranges: false,
+            }));
+        }
+
+        response
+            .error_for_status()
+            .context("download capability probe failed")?;
+        Ok(None)
+    }
+
+    async fn download_file_parallel(
+        &self,
+        download_link: &str,
+        destination: &Path,
+        total_bytes: u64,
+        requested_parts: usize,
+    ) -> Result<u64> {
+        let ranges = split_download_ranges(total_bytes, requested_parts.max(1));
+        if ranges.len() <= 1 {
+            return self
+                .download_file_sequential(download_link, destination, 0)
+                .await;
+        }
+
+        let progress = create_progress_bar(Some(total_bytes));
+        if let Some(progress) = &progress {
+            progress.set_position(0);
+            progress.set_message(format!("download {}", destination.display()));
+        }
+
+        let tasks = ranges.iter().enumerate().map(|(index, (start, end))| {
+            let client = self.http.clone();
+            let url = download_link.to_string();
+            let part_path = part_download_path(destination, index);
+            let progress = progress.clone();
+            let start = *start;
+            let end = *end;
+
+            async move {
+                let response = client
+                    .get(&url)
+                    .header(header::RANGE, format!("bytes={start}-{end}"))
+                    .send()
+                    .await
+                    .with_context(|| format!("failed to request byte range {start}-{end}"))?
+                    .error_for_status()
+                    .with_context(|| format!("range request failed for bytes {start}-{end}"))?;
+
+                if response.status() != StatusCode::PARTIAL_CONTENT {
+                    bail!(
+                        "server ignored byte range {start}-{end}; expected HTTP 206 for parallel download"
+                    );
+                }
+
+                let mut file = fs::File::create(&part_path)
+                    .await
+                    .with_context(|| format!("failed to create {}", part_path.display()))?;
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.context("failed to read parallel download body")?;
+                    file.write_all(&chunk)
+                        .await
+                        .with_context(|| format!("failed to write {}", part_path.display()))?;
+                    if let Some(progress) = &progress {
+                        progress.inc(chunk.len() as u64);
+                    }
+                }
+                file.flush()
+                    .await
+                    .with_context(|| format!("failed to flush {}", part_path.display()))?;
+                Ok::<_, anyhow::Error>(part_path)
+            }
+        });
+
+        let part_paths = match try_join_all(tasks).await {
+            Ok(paths) => paths,
+            Err(err) => {
+                cleanup_download_parts(destination, ranges.len()).await;
+                return Err(err);
+            }
+        };
+
+        let mut merged = fs::File::create(destination)
+            .await
+            .with_context(|| format!("failed to create {}", destination.display()))?;
+        for part_path in &part_paths {
+            let mut part = fs::File::open(part_path)
+                .await
+                .with_context(|| format!("failed to open {}", part_path.display()))?;
+            io::copy(&mut part, &mut merged)
+                .await
+                .with_context(|| format!("failed to merge {}", part_path.display()))?;
+        }
+        merged
+            .flush()
+            .await
+            .with_context(|| format!("failed to flush {}", destination.display()))?;
+
+        for part_path in &part_paths {
+            fs::remove_file(part_path)
+                .await
+                .with_context(|| format!("failed to remove {}", part_path.display()))?;
+        }
+
+        if let Some(progress) = &progress {
+            progress.finish_with_message(format!("download {} complete", destination.display()));
+        }
+
+        Ok(total_bytes)
+    }
+
+    async fn download_file_sequential(
+        &self,
+        download_link: &str,
+        destination: &Path,
+        existing_bytes: u64,
+    ) -> Result<u64> {
+        let response = self
+            .http
+            .get(download_link)
+            .header(header::RANGE, format!("bytes={existing_bytes}-"))
+            .send()
+            .await
+            .context("failed to download file body")?
+            .error_for_status()
+            .context("download request failed")?;
+
+        let resumed = existing_bytes > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
+        let restart_from_zero = existing_bytes > 0 && !resumed;
+        let initial_bytes = if resumed { existing_bytes } else { 0 };
+
+        let total = response.content_length().map(|len| len + initial_bytes);
+        let progress = create_progress_bar(total);
+        if let Some(progress) = &progress {
+            progress.set_position(initial_bytes);
+            progress.set_message(format!("download {}", destination.display()));
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut file = if resumed {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(destination)
+                .await
+                .with_context(|| format!("failed to open {}", destination.display()))?
+        } else {
+            fs::File::create(destination)
+                .await
+                .with_context(|| format!("failed to create {}", destination.display()))?
+        };
+
+        if restart_from_zero {
+            file.set_len(0)
+                .await
+                .with_context(|| format!("failed to reset {}", destination.display()))?;
+        }
+
+        let mut written = initial_bytes;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("failed to read download body")?;
+            file.write_all(&chunk)
+                .await
+                .with_context(|| format!("failed to write {}", destination.display()))?;
+            written += chunk.len() as u64;
+            if let Some(progress) = &progress {
+                progress.set_position(written);
+            }
+        }
+
+        file.flush()
+            .await
+            .with_context(|| format!("failed to flush {}", destination.display()))?;
+        if let Some(progress) = &progress {
+            progress.finish_with_message(format!("download {} complete", destination.display()));
+        }
+        Ok(written)
     }
 
     async fn uploaded_bytes(
@@ -489,6 +800,54 @@ impl SeafileClient {
             .unwrap_or(0))
     }
 
+    async fn get_file_updated_at(&self, repo_id: &str, path: &str) -> Result<Option<String>> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/api2/repos/{repo_id}/file/detail/",
+                self.base_url()
+            ))
+            .header(header::AUTHORIZATION, self.auth_header_value()?)
+            .query(&[("p", path)])
+            .send()
+            .await
+            .with_context(|| format!("failed to request file detail for {path}"))?
+            .error_for_status()
+            .with_context(|| format!("file detail request failed for {path}"))?;
+
+        let detail = response
+            .json::<FileDetail>()
+            .await
+            .with_context(|| format!("failed to decode file detail for {path}"))?;
+        Ok(detail.last_modified)
+    }
+
+    async fn get_dir_updated_at(&self, repo_id: &str, path: &str) -> Result<Option<String>> {
+        if path == "/" {
+            return Ok(None);
+        }
+
+        let response = self
+            .http
+            .get(format!(
+                "{}/api/v2.1/repos/{repo_id}/dir/detail/",
+                self.base_url()
+            ))
+            .header(header::AUTHORIZATION, self.auth_header_value()?)
+            .query(&[("path", path.trim_start_matches('/'))])
+            .send()
+            .await
+            .with_context(|| format!("failed to request directory detail for {path}"))?
+            .error_for_status()
+            .with_context(|| format!("directory detail request failed for {path}"))?;
+
+        let detail = response
+            .json::<DirectoryDetail>()
+            .await
+            .with_context(|| format!("failed to decode directory detail for {path}"))?;
+        Ok(detail.mtime)
+    }
+
     pub fn create_share_link(&self, request: ShareLinkRequest) -> Result<ShareLink> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
@@ -516,6 +875,61 @@ impl SeafileClient {
         })
     }
 
+    pub fn list_all_share_links(&self) -> Result<Vec<ShareLink>> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            self.http
+                .get(format!("{}/api/v2.1/share-links/", self.base_url()))
+                .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .send()
+                .await
+                .context("failed to list share links")?
+                .error_for_status()
+                .context("list share links request failed")?
+                .json::<Vec<ShareLink>>()
+                .await
+                .context("failed to parse share link list response")
+        })
+    }
+
+    pub fn list_share_links(&self, repo_id: &str, path: Option<&str>) -> Result<Vec<ShareLink>> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            let mut query = vec![("repo_id", repo_id.to_string())];
+            if let Some(path) = path {
+                query.push(("path", path.to_string()));
+            }
+
+            self.http
+                .get(format!("{}/api/v2.1/share-links/", self.base_url()))
+                .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .query(&query)
+                .send()
+                .await
+                .context("failed to list share links")?
+                .error_for_status()
+                .context("list share links request failed")?
+                .json::<Vec<ShareLink>>()
+                .await
+                .context("failed to parse share link list response")
+        })
+    }
+
+    pub fn delete_share_link(&self, token: &str) -> Result<()> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            self.http
+                .delete(format!("{}/api/v2.1/share-links/{token}/", self.base_url()))
+                .header(header::AUTHORIZATION, self.auth_header_value()?)
+                .send()
+                .await
+                .context("failed to delete share link")?
+                .error_for_status()
+                .context("delete share link request failed")?;
+            Ok(())
+        })
+    }
+
     fn get_text_endpoint(&self, url: &str, query: &[(&str, &str)]) -> Result<String> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
@@ -536,6 +950,47 @@ impl SeafileClient {
                 .context("failed to read text response")?;
             Ok(text.trim().trim_matches('"').to_string())
         })
+    }
+}
+
+fn parse_total_bytes_from_content_range(header_value: &str) -> Option<u64> {
+    header_value
+        .rsplit_once('/')
+        .and_then(|(_, total)| total.parse::<u64>().ok())
+}
+
+fn split_download_ranges(total_bytes: u64, parts: usize) -> Vec<(u64, u64)> {
+    if total_bytes == 0 {
+        return Vec::new();
+    }
+
+    let parts = parts.max(1) as u64;
+    let chunk_size = total_bytes.div_ceil(parts);
+    let mut ranges = Vec::new();
+    let mut start = 0u64;
+
+    while start < total_bytes {
+        let end = (start + chunk_size).min(total_bytes) - 1;
+        ranges.push((start, end));
+        start = end + 1;
+    }
+
+    ranges
+}
+
+fn part_download_path(destination: &Path, index: usize) -> std::path::PathBuf {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download.thufs-part");
+    parent.join(format!(".{name}.part-{index}.thufs-part"))
+}
+
+async fn cleanup_download_parts(destination: &Path, count: usize) {
+    for index in 0..count {
+        let path = part_download_path(destination, index);
+        let _ = fs::remove_file(path).await;
     }
 }
 
@@ -568,6 +1023,7 @@ fn parse_directory_entries(dir_path: &str, payload: Value) -> Result<Vec<Directo
                 path: full_path,
                 kind,
                 size,
+                updated_at: None,
             })
         })
         .collect()
@@ -577,7 +1033,9 @@ fn parse_directory_entries(dir_path: &str, payload: Value) -> Result<Vec<Directo
 mod tests {
     use tempfile::tempdir;
 
-    use super::{Repository, SeafileClient};
+    use super::{
+        Repository, SeafileClient, parse_total_bytes_from_content_range, split_download_ranges,
+    };
     use crate::{
         config::{Config, ConfigManager, OutputMode},
         contract::RemoteRef,
@@ -613,6 +1071,7 @@ mod tests {
                 &[Repository {
                     id: "repo-id-1".to_string(),
                     name: "course-lib".to_string(),
+                    mtime: None,
                 }],
             )
             .expect("resolve");
@@ -641,14 +1100,33 @@ mod tests {
                     Repository {
                         id: "1".to_string(),
                         name: "dup".to_string(),
+                        mtime: None,
                     },
                     Repository {
                         id: "2".to_string(),
                         name: "dup".to_string(),
+                        mtime: None,
                     },
                 ],
             )
             .expect_err("should fail");
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn parses_total_bytes_from_content_range() {
+        assert_eq!(
+            parse_total_bytes_from_content_range("bytes 0-0/12345"),
+            Some(12345)
+        );
+        assert_eq!(parse_total_bytes_from_content_range("invalid"), None);
+    }
+
+    #[test]
+    fn splits_download_ranges_evenly() {
+        assert_eq!(
+            split_download_ranges(10, 4),
+            vec![(0, 2), (3, 5), (6, 8), (9, 9)]
+        );
     }
 }

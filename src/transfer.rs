@@ -1,13 +1,65 @@
 use std::io::IsTerminal;
 
+use anyhow::{Result, bail};
+use clap::ArgMatches;
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictPolicy {
     Prompt,
     Overwrite,
-    Rename,
+    Uniquify,
     Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadMode {
+    Auto,
+    Parallel,
+    Sequential,
+}
+
+impl DownloadMode {
+    pub fn parse_keyword(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "parallel" => Ok(Self::Parallel),
+            "sequential" => Ok(Self::Sequential),
+            _ => bail!(
+                "invalid download mode `{value}`; expected one of: auto, parallel, sequential"
+            ),
+        }
+    }
+}
+
+impl ConflictPolicy {
+    pub fn parse_keyword(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "prompt" => Ok(Self::Prompt),
+            "overwrite" => Ok(Self::Overwrite),
+            "uniquify" => Ok(Self::Uniquify),
+            "fail" => Ok(Self::Fail),
+            _ => bail!(
+                "invalid conflict policy `{value}`; expected one of: prompt, overwrite, uniquify, fail"
+            ),
+        }
+    }
+}
+
+pub fn conflict_policy_from_matches(matches: &ArgMatches) -> Result<ConflictPolicy> {
+    if let Some(value) = matches.get_one::<String>("conflict") {
+        return ConflictPolicy::parse_keyword(value);
+    }
+
+    if matches.get_flag("overwrite") {
+        Ok(ConflictPolicy::Overwrite)
+    } else if matches.get_flag("rename") {
+        Ok(ConflictPolicy::Uniquify)
+    } else if matches.get_flag("fail") {
+        Ok(ConflictPolicy::Fail)
+    } else {
+        Ok(ConflictPolicy::Uniquify)
+    }
 }
 
 pub fn format_size(bytes: u64) -> String {

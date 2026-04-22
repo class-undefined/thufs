@@ -14,6 +14,7 @@ pub struct ListItem {
     pub path: String,
     pub kind: String,
     pub size: Option<u64>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -33,14 +34,21 @@ impl ListService {
         Self { client }
     }
 
-    pub fn list(&self, remote: &str, config: &ConfigManager) -> Result<ListResult> {
+    pub fn list(
+        &self,
+        remote: &str,
+        config: &ConfigManager,
+        show_time: bool,
+    ) -> Result<ListResult> {
         let resolved_config = config.load_resolved()?;
         let remote = RemoteRef::parse_list_target(remote, resolved_config.default_repo.as_deref())?;
         let repositories = self.client.list_repositories()?;
         let resolved = self.client.resolve_list_target(&remote, &repositories)?;
-        let entries = self
-            .client
-            .list_directory_entries(&resolved.repo_id, &resolved.path)?;
+        let entries = self.client.list_directory_entries_with_time(
+            &resolved.repo_id,
+            &resolved.path,
+            show_time,
+        )?;
 
         Ok(ListResult {
             repo: resolved.repo_name,
@@ -85,6 +93,9 @@ impl ListService {
             if let Some(size) = item.size {
                 line.push_str(&format!(" {}", format_size(size)));
             }
+            if let Some(updated_at) = &item.updated_at {
+                line.push_str(&format!(" {updated_at}"));
+            }
             lines.push(line);
         }
         lines.join("\n")
@@ -101,6 +112,7 @@ impl From<DirectoryEntry> for ListItem {
                 EntryKind::Dir => "dir".to_string(),
             },
             size: entry.size,
+            updated_at: entry.updated_at,
         }
     }
 }
@@ -141,12 +153,14 @@ mod tests {
                 &[Repository {
                     id: "repo-1".to_string(),
                     name: "course-lib".to_string(),
+                    mtime: None,
                 }],
                 &[DirectoryEntry {
                     name: "week1.pdf".to_string(),
                     path: "/slides/week1.pdf".to_string(),
                     kind: EntryKind::File,
                     size: Some(42),
+                    updated_at: None,
                 }],
             )
             .expect("list");
@@ -171,12 +185,14 @@ mod tests {
                 &[Repository {
                     id: "repo-1".to_string(),
                     name: "course-lib".to_string(),
+                    mtime: None,
                 }],
                 &[DirectoryEntry {
                     name: "slides".to_string(),
                     path: "/slides".to_string(),
                     kind: EntryKind::Dir,
                     size: None,
+                    updated_at: None,
                 }],
             )
             .expect("list");
@@ -197,18 +213,21 @@ mod tests {
                     path: "/slides/week1".to_string(),
                     kind: "dir".to_string(),
                     size: None,
+                    updated_at: Some("2026-04-22 12:00:00".to_string()),
                 },
                 super::ListItem {
                     name: "week1.pdf".to_string(),
                     path: "/slides/week1.pdf".to_string(),
                     kind: "file".to_string(),
                     size: Some(42),
+                    updated_at: Some("2026-04-22 12:30:00".to_string()),
                 },
             ],
         });
 
         assert!(rendered.contains("d /slides/week1"));
         assert!(rendered.contains("f /slides/week1.pdf 42 B"));
+        assert!(rendered.contains("2026-04-22 12:30:00"));
     }
 
     #[test]
@@ -222,18 +241,21 @@ mod tests {
                     path: "/tiny.bin".to_string(),
                     kind: "file".to_string(),
                     size: Some(512),
+                    updated_at: None,
                 },
                 super::ListItem {
                     name: "medium.bin".to_string(),
                     path: "/medium.bin".to_string(),
                     kind: "file".to_string(),
                     size: Some(2 * 1024),
+                    updated_at: None,
                 },
                 super::ListItem {
                     name: "large.bin".to_string(),
                     path: "/large.bin".to_string(),
                     kind: "file".to_string(),
                     size: Some(1536 * 1024),
+                    updated_at: None,
                 },
             ],
         });

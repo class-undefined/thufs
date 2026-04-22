@@ -46,7 +46,7 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
         app.renderer.write_json(&mut stdout, &result)?;
     } else {
         app.renderer
-            .write_line(&mut stdout, &result.link)
+            .write_line(&mut stdout, &result.url)
             .context("failed to write share link")?;
     }
     Ok(())

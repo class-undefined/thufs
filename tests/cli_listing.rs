@@ -11,7 +11,9 @@ fn ls_help_is_available() {
         .success()
         .stdout(predicate::str::contains(
             "List remote files and directories",
-        ));
+        ))
+        .stdout(predicate::str::contains("--time"))
+        .stdout(predicate::str::contains("-t"));
 }
 
 #[test]

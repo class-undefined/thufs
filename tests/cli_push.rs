@@ -9,7 +9,8 @@ fn upload_help_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Upload a local file"))
-        .stdout(predicate::str::contains("remote directory"));
+        .stdout(predicate::str::contains("remote directory"))
+        .stdout(predicate::str::contains("--conflict"));
 }
 
 #[test]
@@ -33,7 +34,7 @@ fn push_alias_is_available() {
 }
 
 #[test]
-fn upload_repo_root_without_default_repo_reaches_token_validation() {
+fn upload_repo_root_without_default_repo_can_auto_create_repo() {
     Command::cargo_bin("thufs")
         .expect("binary")
         .args([
@@ -42,6 +43,6 @@ fn upload_repo_root_without_default_repo_reaches_token_validation() {
             "repo:course-lib",
         ])
         .assert()
-        .failure()
+        .success()
         .stderr(predicate::str::contains("remote path must use repo:").not());
 }

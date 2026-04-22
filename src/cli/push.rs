@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 
 use crate::app::App;
 
@@ -16,21 +16,32 @@ pub fn build_command() -> Command {
                 .required(true),
         )
         .arg(
+            Arg::new("conflict")
+                .long("conflict")
+                .value_name("POLICY")
+                .help("Conflict policy: uniquify, overwrite, fail, or prompt")
+                .value_parser(value_parser!(String))
+                .conflicts_with_all(["overwrite", "rename", "fail"]),
+        )
+        .arg(
             Arg::new("overwrite")
                 .long("overwrite")
+                .hide(true)
                 .help("Replace the remote file if it already exists")
                 .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("rename")
                 .long("rename")
-                .help("Pick a unique remote name instead of overwriting")
+                .hide(true)
+                .help("Deprecated alias for --conflict=uniquify")
                 .conflicts_with("overwrite")
                 .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("fail")
                 .long("fail")
+                .hide(true)
                 .help("Fail immediately if the remote file already exists")
                 .conflicts_with_all(["overwrite", "rename"])
                 .action(ArgAction::SetTrue),
@@ -46,15 +57,7 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
     let remote = matches
         .get_one::<String>("remote")
         .expect("required by clap");
-    let conflict_policy = if matches.get_flag("overwrite") {
-        crate::transfer::ConflictPolicy::Overwrite
-    } else if matches.get_flag("rename") {
-        crate::transfer::ConflictPolicy::Rename
-    } else if matches.get_flag("fail") {
-        crate::transfer::ConflictPolicy::Fail
-    } else {
-        crate::transfer::ConflictPolicy::Prompt
-    };
+    let conflict_policy = crate::transfer::conflict_policy_from_matches(matches)?;
 
     let result = app.push_service.push(&local, remote, conflict_policy)?;
     let mut stdout = std::io::stdout();
@@ -68,8 +71,8 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
                 result.local_path,
                 result.repo,
                 result.remote_path,
-                if result.renamed {
-                    "renamed"
+                if result.uniquified {
+                    "uniquified"
                 } else if result.overwritten {
                     "overwritten"
                 } else {

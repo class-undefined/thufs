@@ -7,17 +7,24 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::{
-    config::ConfigManager, contract::RemoteRef, seafile::SeafileClient, transfer::ConflictPolicy,
+    config::ConfigManager,
+    contract::RemoteRef,
+    seafile::SeafileClient,
+    transfer::{ConflictPolicy, DownloadMode},
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PullResult {
     pub repo: String,
+    pub requested_local_path: String,
+    pub final_local_path: String,
     pub remote_path: String,
+    pub remote_name: String,
     pub local_path: String,
+    pub local_name: String,
     pub bytes_written: u64,
     pub overwritten: bool,
-    pub renamed: bool,
+    pub uniquified: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -36,23 +43,26 @@ impl PullService {
         remote: &str,
         local: Option<&Path>,
         policy: ConflictPolicy,
+        download_mode: DownloadMode,
+        workers: usize,
     ) -> Result<PullResult> {
         let resolved_config = self.config.load_resolved()?;
         let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
         let requested_destination = resolve_requested_destination(local, &remote.path)?;
         let mut destination = resolve_local_destination(&requested_destination, &remote.path)?;
+        let requested_local_path = destination.display().to_string();
         let mut overwritten = false;
-        let mut renamed = false;
+        let mut uniquified = false;
         if destination.exists() {
             match resolve_conflict_policy(policy, &destination)? {
                 ConflictPolicy::Overwrite => overwritten = true,
-                ConflictPolicy::Rename => {
+                ConflictPolicy::Uniquify => {
                     destination = next_available_local_path(&destination);
-                    renamed = true;
+                    uniquified = true;
                 }
                 ConflictPolicy::Fail | ConflictPolicy::Prompt => {
                     bail!(
-                        "local destination `{}` already exists; rerun with --overwrite or --rename",
+                        "local destination `{}` already exists; rerun with --conflict overwrite, --conflict uniquify, or --conflict fail",
                         destination.display()
                     );
                 }
@@ -78,7 +88,17 @@ impl PullService {
             .client
             .get_download_link(&resolved.repo_id, &resolved.path)?;
         let temp_path = temporary_download_path(&destination)?;
-        let bytes_written = self.client.download_file(&download_link, &temp_path)?;
+        let bytes_written =
+            self.client
+                .download_file(&download_link, &temp_path, download_mode, workers)?;
+        if overwritten && destination.exists() {
+            std::fs::remove_file(&destination).with_context(|| {
+                format!(
+                    "failed to remove existing destination before overwrite: {}",
+                    destination.display()
+                )
+            })?;
+        }
         std::fs::rename(&temp_path, &destination).with_context(|| {
             format!(
                 "failed to move downloaded file into place: {}",
@@ -89,10 +109,14 @@ impl PullService {
         Ok(PullResult {
             repo: resolved.repo_name,
             remote_path: resolved.path,
+            remote_name: remote_filename(&remote.path)?.to_string(),
+            requested_local_path,
+            final_local_path: destination.display().to_string(),
             local_path: destination.display().to_string(),
+            local_name: local_filename(&destination)?,
             bytes_written,
             overwritten,
-            renamed,
+            uniquified,
         })
     }
 }
@@ -121,6 +145,13 @@ fn remote_filename(remote_path: &str) -> Result<&str> {
         .next()
         .filter(|segment| !segment.is_empty())
         .ok_or_else(|| anyhow::anyhow!("remote path `{remote_path}` must point to a file"))
+}
+
+fn local_filename(path: &Path) -> Result<String> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_string())
+        .ok_or_else(|| anyhow::anyhow!("local path `{}` has invalid filename", path.display()))
 }
 
 fn temporary_download_path(destination: &Path) -> Result<PathBuf> {
@@ -175,34 +206,22 @@ fn resolve_conflict_policy(policy: ConflictPolicy, path: &Path) -> Result<Confli
     }
 
     let stderr = std::io::stderr();
-    if !stderr.is_terminal() {
-        bail!(
-            "download to `{}` requires --overwrite, --rename, or --fail in non-interactive mode",
+    if stderr.is_terminal() {
+        let mut stderr = stderr.lock();
+        writeln!(
+            stderr,
+            "Local file `{}` already exists. Defaulting to uniquify; use --conflict to override.",
             path.display()
-        );
+        )?;
+        stderr.flush()?;
     }
 
-    let mut stderr = stderr.lock();
-    writeln!(
-        stderr,
-        "Local file `{}` already exists. [o]verwrite, [r]ename, [f]ail?",
-        path.display()
-    )?;
-    stderr.flush()?;
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    match input.trim().to_ascii_lowercase().as_str() {
-        "o" | "overwrite" => Ok(ConflictPolicy::Overwrite),
-        "r" | "rename" => Ok(ConflictPolicy::Rename),
-        "f" | "fail" | "" => Ok(ConflictPolicy::Fail),
-        _ => bail!("unrecognized conflict choice"),
-    }
+    Ok(ConflictPolicy::Uniquify)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
 
@@ -232,5 +251,15 @@ mod tests {
         std::fs::write(&existing, "data").expect("write");
         let renamed = next_available_local_path(&existing);
         assert!(renamed.ends_with("week1-(1).pdf"));
+    }
+
+    #[test]
+    fn prompt_policy_defaults_to_uniquify() {
+        let resolved = super::resolve_conflict_policy(
+            crate::transfer::ConflictPolicy::Prompt,
+            Path::new("week1.pdf"),
+        )
+        .expect("resolve");
+        assert_eq!(resolved, crate::transfer::ConflictPolicy::Uniquify);
     }
 }
