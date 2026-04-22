@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -45,13 +47,18 @@ jobs:
         run: cargo fmt --check
 
       - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         shell: bash
         run: |
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            release_tag="${{ inputs.release_tag }}"
+          fi
+
           crate_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-          tag_version="${GITHUB_REF_NAME#v}"
+          tag_version="${release_tag#v}"
           if [[ "$crate_version" != "$tag_version" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate_version" >&2
+            echo "Tag $release_tag does not match Cargo.toml version $crate_version" >&2
             exit 1
           fi
 
@@ -65,6 +72,7 @@ jobs:
         run: cargo package --locked --verbose
 
       - name: Validate publish
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
         run: cargo publish --locked --dry-run
 
   publish:
@@ -76,6 +84,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -88,18 +98,88 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+  release-assets:
+    name: Build release assets
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --locked --release --verbose
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          asset="thufs-${version}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp target/release/thufs dist/thufs
+          tar -C dist -czf "dist/${asset}" thufs
+          rm dist/thufs
+          sha256sum "dist/${asset}" > "dist/${asset}.sha256"
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = $metadata.packages[0].version
+          $asset = "thufs-$version-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/thufs.exe dist/thufs.exe
+          Compress-Archive -Path dist/thufs.exe -DestinationPath "dist/$asset" -Force
+          Remove-Item dist/thufs.exe
+          $hash = (Get-FileHash "dist/$asset" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Out-File -FilePath "dist/$asset.sha256" -Encoding ascii
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
   github-release:
     name: Create GitHub Release
     needs:
       - package
       - publish
-    if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') && needs.package.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      - release-assets
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') && needs.package.result == 'success' && needs.release-assets.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Create release
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-asset-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update release
         shell: bash
         run: |
           release_tag="${GITHUB_REF_NAME}"
@@ -112,9 +192,43 @@ jobs:
             exit 1
           fi
 
-          gh release create "$release_tag" \
+          version="${release_tag#v}"
+          {
+            echo "## thufs ${version}"
+            echo
+            echo "Install from crates.io:"
+            echo
+            echo '```bash'
+            echo "cargo install thufs --version ${version}"
+            echo '```'
+            echo
+            echo "Crate: https://crates.io/crates/thufs/${version}"
+            echo
+            echo "Release assets:"
+            for asset in dist/*; do
+              echo "- $(basename "$asset")"
+            done
+          } > release-notes.md
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$release_tag" \
+              --notes-file release-notes.md
+          else
+            gh release create "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$release_tag" \
+              --notes-file release-notes.md
+          fi
+
+          gh release upload "$release_tag" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$release_tag" \
-            --generate-notes
+            --clobber
+
+          gh release view "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,url,isDraft,isPrerelease,publishedAt,assets \
+            --jq '{tag: .tagName, name, url, draft: .isDraft, prerelease: .isPrerelease, publishedAt, assets: [.assets[].name]}'
         env:
           GH_TOKEN: ${{ github.token }}
