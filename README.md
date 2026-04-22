@@ -86,6 +86,8 @@ Upload a single local file:
 
 ```bash
 thufs upload ./report.pdf repo:course-lib/submissions/report.pdf
+thufs upload ./report.pdf repo:course-lib
+thufs upload ./report.pdf submissions/
 thufs upload --overwrite ./report.pdf repo:course-lib/submissions/report.pdf
 thufs upload --rename ./report.pdf repo:course-lib/submissions/report.pdf
 ```
@@ -101,13 +103,15 @@ thufs download --rename repo:course-lib/slides/week1.pdf ./week1.pdf
 
 If `download` omits the local path, `thufs` saves into the current directory using the remote file name.
 
+If `upload` points at a repo root or a remote directory ending with `/`, `thufs` uses the local file name automatically.
+
 `upload` and `download` support these conflict controls:
 
 - `--overwrite` replace the existing target
 - `--rename` choose a unique sibling name
 - `--fail` fail immediately instead of prompting
 
-In an interactive terminal, if none of these flags are provided and the target already exists, `thufs` prompts for overwrite or rename. In non-interactive mode, pass one of the flags explicitly.
+In an interactive terminal, if none of these flags are provided and the target already exists, `thufs` prompts for overwrite or rename. In non-interactive mode, `upload` defaults to automatic rename and `download` requires an explicit policy flag.
 
 ## Transfer UX
 

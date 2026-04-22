@@ -12,7 +12,7 @@ pub fn build_command() -> Command {
         .arg(Arg::new("local").help("Local source file").required(true))
         .arg(
             Arg::new("remote")
-                .help("Remote file path in repo:<library>/<path> form or default-repo shorthand")
+                .help("Remote file path, remote directory, or repo root in repo:<library>/<path> form or default-repo shorthand")
                 .required(true),
         )
         .arg(

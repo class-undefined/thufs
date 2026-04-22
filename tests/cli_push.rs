@@ -8,7 +8,8 @@ fn upload_help_is_available() {
         .args(["upload", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Upload a local file"));
+        .stdout(predicate::str::contains("Upload a local file"))
+        .stdout(predicate::str::contains("remote directory"));
 }
 
 #[test]
@@ -29,4 +30,18 @@ fn push_alias_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Upload a local file"));
+}
+
+#[test]
+fn upload_repo_root_without_default_repo_reaches_token_validation() {
+    Command::cargo_bin("thufs")
+        .expect("binary")
+        .args([
+            "upload",
+            "/Volumes/zhitai/code/thufs/Cargo.toml",
+            "repo:course-lib",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("remote path must use repo:").not());
 }

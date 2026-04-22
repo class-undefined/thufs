@@ -38,7 +38,7 @@ impl PushService {
         self.validate_local_source(local)?;
 
         let resolved_config = self.config.load_resolved()?;
-        let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
+        let remote = parse_upload_target(remote, local, resolved_config.default_repo.as_deref())?;
         let repositories = self.client.list_repositories()?;
         let resolved = self.client.resolve_remote_ref(&remote, &repositories)?;
 
@@ -147,6 +147,69 @@ fn split_parent_and_name(path: &str) -> Result<(&str, &str)> {
     Ok((parent, name))
 }
 
+fn parse_upload_target(
+    remote: &str,
+    local: &Path,
+    default_repo: Option<&str>,
+) -> Result<RemoteRef> {
+    let file_name = local
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("local source `{}` has invalid filename", local.display())
+        })?;
+
+    let trimmed = remote.trim();
+    if trimmed.is_empty() {
+        bail!("remote path cannot be empty");
+    }
+
+    if let Some(explicit_repo) = trimmed.strip_prefix("repo:") {
+        let repo = explicit_repo.trim_end_matches('/');
+        if repo.is_empty() || repo.contains('/') {
+            return RemoteRef::parse(remote, default_repo);
+        }
+        return Ok(RemoteRef {
+            repo: repo.to_string(),
+            path: format!("/{file_name}"),
+        });
+    }
+
+    if trimmed.ends_with('/') {
+        if let Some(default_repo) = default_repo.filter(|repo| !repo.trim().is_empty()) {
+            let base = trimmed.trim_end_matches('/');
+            let path = if base.is_empty() {
+                format!("/{file_name}")
+            } else {
+                format!("/{}/{}", base.trim_start_matches('/'), file_name)
+            };
+            return Ok(RemoteRef {
+                repo: default_repo.to_string(),
+                path,
+            });
+        }
+    }
+
+    if let Ok(parsed) = RemoteRef::parse(remote, default_repo) {
+        return Ok(parsed);
+    }
+
+    if let Some(default_repo) = default_repo.filter(|repo| !repo.trim().is_empty()) {
+        let base = trimmed.trim_end_matches('/');
+        let path = if base.is_empty() {
+            format!("/{file_name}")
+        } else {
+            format!("/{}/{}", base.trim_start_matches('/'), file_name)
+        };
+        return Ok(RemoteRef {
+            repo: default_repo.to_string(),
+            path,
+        });
+    }
+
+    bail!("remote path must use repo:<library>/<path> when no default repo is configured")
+}
+
 fn join_remote_path(parent: &str, name: &str) -> String {
     if parent == "/" {
         format!("/{name}")
@@ -185,9 +248,7 @@ fn resolve_conflict_policy(policy: ConflictPolicy, path: &str) -> Result<Conflic
 
     let stderr = std::io::stderr();
     if !stderr.is_terminal() {
-        bail!(
-            "upload to `{path}` requires --overwrite, --rename, or --fail in non-interactive mode"
-        );
+        return Ok(ConflictPolicy::Rename);
     }
 
     let mut stderr = stderr.lock();
@@ -252,5 +313,31 @@ mod tests {
     fn split_filename_preserves_extension() {
         assert_eq!(super::split_filename("report.pdf"), ("report", "pdf"));
         assert_eq!(super::split_filename("archive"), ("archive", ""));
+    }
+
+    #[test]
+    fn upload_target_can_use_repo_root_and_local_filename() {
+        let remote = super::parse_upload_target(
+            "repo:course-lib",
+            PathBuf::from("/tmp/report.pdf").as_path(),
+            None,
+        )
+        .expect("parse");
+
+        assert_eq!(remote.repo, "course-lib");
+        assert_eq!(remote.path, "/report.pdf");
+    }
+
+    #[test]
+    fn upload_target_can_use_default_repo_directory_and_local_filename() {
+        let remote = super::parse_upload_target(
+            "submissions/",
+            PathBuf::from("/tmp/report.pdf").as_path(),
+            Some("course-lib"),
+        )
+        .expect("parse");
+
+        assert_eq!(remote.repo, "course-lib");
+        assert_eq!(remote.path, "/submissions/report.pdf");
     }
 }
