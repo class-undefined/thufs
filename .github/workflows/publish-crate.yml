@@ -1,0 +1,99 @@
+name: Publish crate
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to crates.io. Leave disabled for validation only.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-crate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Build and package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          crate_version="$(cargo pkgid | sed 's/.*@//')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$crate_version" != "$tag_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate_version" >&2
+            exit 1
+          fi
+
+      - name: Build release binary
+        run: cargo build --locked --release --verbose
+
+      - name: Run tests
+        run: cargo test --locked --verbose
+
+      - name: Package crate
+        run: cargo package --locked --verbose
+
+      - name: Validate publish
+        run: cargo publish --locked --dry-run
+
+  publish:
+    name: Publish to crates.io
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Publish crate
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Create release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

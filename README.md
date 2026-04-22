@@ -1,9 +1,11 @@
 # thufs
 
 [![GitHub stars](https://img.shields.io/github/stars/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/stargazers)
-[![GitHub license](https://img.shields.io/github/license/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/blob/main/LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/class-undefined/thufs/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/class-undefined/thufs/actions/workflows/ci.yml)
-[![GitHub last commit](https://img.shields.io/github/last-commit/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/commits/main)
+[![GitHub license](https://img.shields.io/github/license/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/blob/master/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/class-undefined/thufs/ci.yml?branch=master&style=flat-square&label=CI)](https://github.com/class-undefined/thufs/actions/workflows/ci.yml)
+[![Publish crate](https://img.shields.io/github/actions/workflow/status/class-undefined/thufs/publish-crate.yml?branch=master&style=flat-square&label=crate)](https://github.com/class-undefined/thufs/actions/workflows/publish-crate.yml)
+[![Crates.io](https://img.shields.io/crates/v/thufs?style=flat-square)](https://crates.io/crates/thufs)
+[![GitHub last commit](https://img.shields.io/github/last-commit/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/commits/master)
 [![GitHub issues](https://img.shields.io/github/issues/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/issues)
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Backend: Seafile](https://img.shields.io/badge/Backend-Seafile-ff6b6b?style=flat-square)](https://www.seafile.com/)
@@ -36,7 +38,6 @@
 - 冲突策略统一为 `--conflict`
 - 默认冲突策略为 `uniquify`，避免静默覆盖
 - JSON 输出中返回最终落点路径，便于脚本追踪自动重命名结果
-- GitHub Actions 在 Linux / Windows 上运行构建与测试
 - `upload` 在目标 library 或目录不存在时会自动创建
 - `ls` 支持展示更新时间
 
@@ -46,14 +47,21 @@
 
 - 在服务器上把实验结果直接上传到云盘
 - 在脚本里拉取某个共享文件作为输入
-- 在 CI、cron、集群作业里稳定地保存产物
+- 在 cron、集群作业、自动化脚本里稳定地保存产物
 - 快速查看某个库里的内容，而不是启动图形界面
 
 `thufs` 针对的就是这类需求。它更像 `scp`、`rsync`、`curl` 这种“拿来即用”的命令工具，而不是一个常驻同步守护进程。
 
 ## 安装
 
-目前推荐从源码构建：
+直接通过 Cargo 安装：
+
+```bash
+cargo install thufs
+thufs --help
+```
+
+也可以从源码构建：
 
 ```bash
 git clone git@github.com:class-undefined/thufs.git
@@ -116,7 +124,7 @@ thufs --json config show
 - `THUFS_OUTPUT`
 - `THUFS_CONFIG_DIR`
 
-设计原则是“配置文件优先，环境变量覆盖”，这样既适合日常使用，也适合临时脚本或 CI 注入。
+设计原则是“配置文件优先，环境变量覆盖”，这样既适合日常使用，也适合临时脚本注入。
 
 ## 远程路径规则
 
@@ -389,9 +397,7 @@ echo "saved to: $FINAL_PATH"
 cargo test
 ```
 
-本仓库的 GitHub Actions 也会在 Linux 和 Windows 上执行 `cargo fmt --check`、`cargo build` 与 `cargo test`。
-
-本地真实服务端到端测试不会接入 CI，需要显式确认后手动执行：
+本地真实服务端到端测试需要显式确认后手动执行：
 
 ```bash
 export THUFS_TOKEN="<seafile-api-token>"

@@ -1,9 +1,11 @@
 # thufs
 
 [![GitHub stars](https://img.shields.io/github/stars/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/stargazers)
-[![GitHub license](https://img.shields.io/github/license/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/blob/main/LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/class-undefined/thufs/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/class-undefined/thufs/actions/workflows/ci.yml)
-[![GitHub last commit](https://img.shields.io/github/last-commit/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/commits/main)
+[![GitHub license](https://img.shields.io/github/license/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/blob/master/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/class-undefined/thufs/ci.yml?branch=master&style=flat-square&label=CI)](https://github.com/class-undefined/thufs/actions/workflows/ci.yml)
+[![Publish crate](https://img.shields.io/github/actions/workflow/status/class-undefined/thufs/publish-crate.yml?branch=master&style=flat-square&label=crate)](https://github.com/class-undefined/thufs/actions/workflows/publish-crate.yml)
+[![Crates.io](https://img.shields.io/crates/v/thufs?style=flat-square)](https://crates.io/crates/thufs)
+[![GitHub last commit](https://img.shields.io/github/last-commit/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/commits/master)
 [![GitHub issues](https://img.shields.io/github/issues/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/issues)
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Backend: Seafile](https://img.shields.io/badge/Backend-Seafile-ff6b6b?style=flat-square)](https://www.seafile.com/)
@@ -29,13 +31,19 @@ Instead of being a heavy sync client, `thufs` is designed for SSH sessions, remo
 - unified `--conflict` strategy
 - default conflict behavior is `uniquify`
 - JSON output includes final resolved paths for scripting
-- GitHub Actions runs build and test on Linux and Windows
 - `upload` auto-creates missing libraries and parent directories
 - `ls` includes update timestamps
 
 ## Installation
 
-Build from source:
+Install it with Cargo:
+
+```bash
+cargo install thufs
+thufs --help
+```
+
+You can also build from source:
 
 ```bash
 git clone git@github.com:class-undefined/thufs.git
@@ -322,9 +330,7 @@ Run tests:
 cargo test
 ```
 
-The GitHub Actions workflow also runs `cargo fmt --check`, `cargo build`, and `cargo test` on both Linux and Windows.
-
-The real-service end-to-end flow is intentionally local-only and is not wired into CI:
+The real-service end-to-end flow must be explicitly enabled before running locally:
 
 ```bash
 export THUFS_TOKEN="<seafile-api-token>"
