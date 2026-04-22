@@ -254,6 +254,7 @@ impl SeafileClient {
 
     pub fn upload_file(
         &self,
+        repo_id: &str,
         upload_link: &str,
         local_path: &Path,
         parent_dir: &str,
@@ -264,20 +265,13 @@ impl SeafileClient {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
             let uploaded_bytes = self
-                .uploaded_bytes(upload_link, parent_dir, target_name)
+                .uploaded_bytes(repo_id, parent_dir, target_name)
                 .await
                 .unwrap_or(0);
             let content = fs::read(local_path)
                 .await
                 .with_context(|| format!("failed to read {}", local_path.display()))?;
             let start = uploaded_bytes.min(content.len() as u64) as usize;
-            let part = reqwest::multipart::Part::bytes(content[start..].to_vec())
-                .file_name(target_name.to_string());
-            let form = reqwest::multipart::Form::new()
-                .part("file", part)
-                .text("parent_dir", parent_dir.to_string())
-                .text("replace", if replace { "1" } else { "0" }.to_string())
-                .text("file_name", target_name.to_string());
 
             let progress = create_progress_bar(Some(total_bytes));
             if let Some(progress) = &progress {
@@ -285,25 +279,54 @@ impl SeafileClient {
                 progress.set_message(format!("upload {}", local_path.display()));
             }
 
-            let response = self
-                .http
-                .post(format!("{upload_link}?ret-json=1"))
-                .header(header::AUTHORIZATION, self.auth_header_value()?)
-                .header(
-                    "Content-Range",
-                    format!(
-                        "bytes {}-{}/{}",
-                        start,
-                        content.len().saturating_sub(1),
-                        content.len()
-                    ),
-                )
-                .multipart(form)
-                .send()
-                .await
-                .context("failed to upload file")?
-                .error_for_status()
-                .context("upload request failed")?;
+            let response = if uploaded_bytes > 0 {
+                let part = reqwest::multipart::Part::bytes(content[start..].to_vec())
+                    .file_name(target_name.to_string());
+                let form = reqwest::multipart::Form::new()
+                    .part("file", part)
+                    .text("parent_dir", parent_dir.to_string())
+                    .text("replace", if replace { "1" } else { "0" }.to_string());
+
+                self.http
+                    .post(format!("{upload_link}?ret-json=1"))
+                    .header(header::AUTHORIZATION, self.auth_header_value()?)
+                    .header(
+                        "Content-Range",
+                        format!(
+                            "bytes {}-{}/{}",
+                            start,
+                            content.len().saturating_sub(1),
+                            content.len()
+                        ),
+                    )
+                    .header(
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{target_name}\""),
+                    )
+                    .multipart(form)
+                    .send()
+                    .await
+                    .context("failed to resume upload")?
+                    .error_for_status()
+                    .context("resumable upload request failed")?
+            } else {
+                let part =
+                    reqwest::multipart::Part::bytes(content).file_name(target_name.to_string());
+                let form = reqwest::multipart::Form::new()
+                    .part("file", part)
+                    .text("parent_dir", parent_dir.to_string())
+                    .text("replace", if replace { "1" } else { "0" }.to_string());
+
+                self.http
+                    .post(format!("{upload_link}?ret-json=1"))
+                    .header(header::AUTHORIZATION, self.auth_header_value()?)
+                    .multipart(form)
+                    .send()
+                    .await
+                    .context("failed to upload file")?
+                    .error_for_status()
+                    .context("upload request failed")?
+            };
 
             if let Some(progress) = &progress {
                 progress.finish_with_message(format!("upload {} complete", local_path.display()));
@@ -437,19 +460,18 @@ impl SeafileClient {
 
     async fn uploaded_bytes(
         &self,
-        upload_link: &str,
+        repo_id: &str,
         parent_dir: &str,
         file_name: &str,
     ) -> Result<u64> {
         let response = self
             .http
-            .get(upload_link)
+            .get(format!(
+                "{}/api/v2.1/repos/{repo_id}/file-uploaded-bytes/",
+                self.base_url()
+            ))
             .header(header::AUTHORIZATION, self.auth_header_value()?)
-            .query(&[
-                ("parent_dir", parent_dir),
-                ("file_name", file_name),
-                ("ret-json", "1"),
-            ])
+            .query(&[("parent_dir", parent_dir), ("file_name", file_name)])
             .send()
             .await
             .context("failed to inspect uploaded bytes")?
@@ -462,7 +484,7 @@ impl SeafileClient {
             .context("failed to parse uploaded-bytes response")?;
 
         Ok(payload
-            .get("file-uploaded-bytes")
+            .get("uploadedBytes")
             .and_then(Value::as_u64)
             .unwrap_or(0))
     }

@@ -82,6 +82,7 @@ impl PushService {
                         let upload_link =
                             self.client.get_upload_link(&resolved.repo_id, parent_dir)?;
                         self.client.upload_file(
+                            &resolved.repo_id,
                             &upload_link,
                             local,
                             parent_dir,
@@ -101,6 +102,7 @@ impl PushService {
             None => {
                 let upload_link = self.client.get_upload_link(&resolved.repo_id, parent_dir)?;
                 self.client.upload_file(
+                    &resolved.repo_id,
                     &upload_link,
                     local,
                     parent_dir,
