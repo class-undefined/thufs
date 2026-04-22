@@ -12,6 +12,10 @@ on:
         description: Publish to crates.io. Leave disabled for validation only.
         type: boolean
         default: false
+      release_tag:
+        description: Existing v* tag to create a GitHub Release for without publishing.
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -86,14 +90,31 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: publish
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - package
+      - publish
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') && needs.package.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - name: Create release
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        shell: bash
+        run: |
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            release_tag="${{ inputs.release_tag }}"
+          fi
+
+          if [[ -z "$release_tag" ]]; then
+            echo "release_tag is required when this job is not running for a v* tag" >&2
+            exit 1
+          fi
+
+          gh release create "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$release_tag" \
+            --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
