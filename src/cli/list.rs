@@ -8,7 +8,7 @@ pub fn build_command() -> Command {
         .about("List remote files and directories")
         .arg(
             Arg::new("remote")
-                .help("Remote path in repo:<library>/<path> form or default-repo shorthand")
+                .help("Remote path in repo:<library>/<path> form, repo root like <library>, or default-repo shorthand")
                 .required(true),
         )
 }

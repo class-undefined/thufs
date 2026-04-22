@@ -34,7 +34,7 @@ impl ListService {
 
     pub fn list(&self, remote: &str, config: &ConfigManager) -> Result<ListResult> {
         let resolved_config = config.load_resolved()?;
-        let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
+        let remote = RemoteRef::parse_list_target(remote, resolved_config.default_repo.as_deref())?;
         let repositories = self.client.list_repositories()?;
         let resolved = self.client.resolve_list_target(&remote, &repositories)?;
         let entries = self
@@ -57,7 +57,7 @@ impl ListService {
         entries: &[DirectoryEntry],
     ) -> Result<ListResult> {
         let resolved_config = config.load_resolved()?;
-        let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
+        let remote = RemoteRef::parse_list_target(remote, resolved_config.default_repo.as_deref())?;
         let resolved = self.client.resolve_list_target(&remote, repositories)?;
 
         Ok(ListResult {
@@ -154,6 +154,35 @@ mod tests {
         assert_eq!(result.path, "/slides");
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].kind, "file");
+    }
+
+    #[test]
+    fn list_result_accepts_repo_root_without_default_repo() {
+        let temp = tempdir().expect("tempdir");
+        let manager = ConfigManager::from_path(temp.path().join("config.json"));
+        let client = SeafileClient::new(manager.clone());
+        let service = ListService::new(client);
+
+        let result = service
+            .list_with_repositories(
+                "course-lib",
+                &manager,
+                &[Repository {
+                    id: "repo-1".to_string(),
+                    name: "course-lib".to_string(),
+                }],
+                &[DirectoryEntry {
+                    name: "slides".to_string(),
+                    path: "/slides".to_string(),
+                    kind: EntryKind::Dir,
+                    size: None,
+                }],
+            )
+            .expect("list");
+
+        assert_eq!(result.repo, "course-lib");
+        assert_eq!(result.path, "/");
+        assert_eq!(result.items[0].kind, "dir");
     }
 
     #[test]

@@ -21,7 +21,7 @@ fn ls_fails_without_default_repo_for_shorthand_path() {
     Command::cargo_bin("thufs")
         .expect("binary")
         .env("THUFS_CONFIG_DIR", temp.path())
-        .args(["ls", "notes"])
+        .args(["ls", "notes/todo"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("remote path must use repo:"));
@@ -35,6 +35,19 @@ fn ls_fails_without_token_before_network_for_explicit_path() {
         .expect("binary")
         .env("THUFS_CONFIG_DIR", temp.path())
         .args(["--json", "ls", "repo:course-lib/slides"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no token configured"));
+}
+
+#[test]
+fn ls_repo_root_without_default_repo_reaches_token_validation() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::cargo_bin("thufs")
+        .expect("binary")
+        .env("THUFS_CONFIG_DIR", temp.path())
+        .args(["ls", "course-lib"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no token configured"));
