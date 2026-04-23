@@ -92,8 +92,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
@@ -187,7 +185,7 @@ jobs:
             echo
             echo "- download now accepts THU Cloud share URLs and \`--share <hashcode>\`, and ignores query strings like \`?dl=1\` when extracting the token"
             echo "- minimum supported Rust version is now 1.85, with CI coverage to keep that floor stable"
-            echo "- GitHub Releases include prebuilt macOS archives for Apple Silicon and Intel"
+            echo "- GitHub Releases include a prebuilt macOS archive for Apple Silicon; Intel Macs should use cargo install"
             echo
             echo "Install from crates.io:"
             echo
