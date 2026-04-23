@@ -15,6 +15,7 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PullResult {
+    pub source: String,
     pub repo: String,
     pub requested_local_path: String,
     pub final_local_path: String,
@@ -42,14 +43,28 @@ impl PullService {
         &self,
         remote: &str,
         local: Option<&Path>,
+        from_share: bool,
         policy: ConflictPolicy,
         download_mode: DownloadMode,
         workers: usize,
     ) -> Result<PullResult> {
-        let resolved_config = self.config.load_resolved()?;
-        let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
-        let requested_destination = resolve_requested_destination(local, &remote.path)?;
-        let mut destination = resolve_local_destination(&requested_destination, &remote.path)?;
+        let local_requires_remote_name = local.is_none() || local.is_some_and(|path| path.is_dir());
+        let target = if local_requires_remote_name {
+            Some(self.resolve_download_target(remote, from_share)?)
+        } else {
+            None
+        };
+        let requested_destination = match (local, target.as_ref()) {
+            (Some(local), _) => local.to_path_buf(),
+            (None, Some(target)) => PathBuf::from(&target.remote_name),
+            (None, None) => {
+                unreachable!("remote name is required when local destination is omitted")
+            }
+        };
+        let mut destination = match target.as_ref() {
+            Some(target) => resolve_local_destination(&requested_destination, &target.remote_name)?,
+            None => requested_destination.clone(),
+        };
         let requested_local_path = destination.display().to_string();
         let mut overwritten = false;
         let mut uniquified = false;
@@ -81,16 +96,15 @@ impl PullService {
             );
         }
 
-        let repositories = self.client.list_repositories()?;
-        let resolved = self.client.resolve_remote_ref(&remote, &repositories)?;
+        let target = match target {
+            Some(target) => target,
+            None => self.resolve_download_target(remote, from_share)?,
+        };
 
-        let download_link = self
-            .client
-            .get_download_link(&resolved.repo_id, &resolved.path)?;
         let temp_path = temporary_download_path(&destination)?;
         let bytes_written =
             self.client
-                .download_file(&download_link, &temp_path, download_mode, workers)?;
+                .download_file(&target.download_link, &temp_path, download_mode, workers)?;
         if overwritten && destination.exists() {
             std::fs::remove_file(&destination).with_context(|| {
                 format!(
@@ -107,9 +121,10 @@ impl PullService {
         })?;
 
         Ok(PullResult {
-            repo: resolved.repo_name,
-            remote_path: resolved.path,
-            remote_name: remote_filename(&remote.path)?.to_string(),
+            source: target.source,
+            repo: target.repo,
+            remote_path: target.remote_path,
+            remote_name: target.remote_name,
             requested_local_path,
             final_local_path: destination.display().to_string(),
             local_path: destination.display().to_string(),
@@ -119,16 +134,117 @@ impl PullService {
             uniquified,
         })
     }
+
+    fn resolve_download_target(
+        &self,
+        remote: &str,
+        from_share: bool,
+    ) -> Result<ResolvedDownloadTarget> {
+        if let Some(shared) = parse_share_ref(remote, from_share)? {
+            let shared_file = self.client.inspect_shared_file(&shared.token)?;
+            return Ok(ResolvedDownloadTarget {
+                source: format!("share:{}", shared.token),
+                repo: "share".to_string(),
+                remote_path: format!("/{}", shared_file.file_name),
+                remote_name: shared_file.file_name,
+                download_link: shared_file.download_link,
+            });
+        }
+
+        let resolved_config = self.config.load_resolved()?;
+        let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
+        let repositories = self.client.list_repositories()?;
+        let resolved = self.client.resolve_remote_ref(&remote, &repositories)?;
+        let download_link = self
+            .client
+            .get_download_link(&resolved.repo_id, &resolved.path)?;
+
+        Ok(ResolvedDownloadTarget {
+            source: format!("repo:{}{}", resolved.repo_name, resolved.path),
+            repo: resolved.repo_name,
+            remote_path: resolved.path,
+            remote_name: remote_filename(&remote.path)?.to_string(),
+            download_link,
+        })
+    }
 }
 
-fn resolve_requested_destination(local: Option<&Path>, remote_path: &str) -> Result<PathBuf> {
-    match local {
-        Some(local) => Ok(local.to_path_buf()),
-        None => {
-            let name = remote_filename(remote_path)?;
-            Ok(PathBuf::from(name))
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedDownloadTarget {
+    source: String,
+    repo: String,
+    remote_path: String,
+    remote_name: String,
+    download_link: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShareRef {
+    token: String,
+}
+
+fn parse_share_ref(input: &str, from_share: bool) -> Result<Option<ShareRef>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
     }
+
+    if let Some(token) = parse_share_url(trimmed)? {
+        return Ok(Some(ShareRef { token }));
+    }
+
+    if from_share {
+        return Ok(Some(ShareRef {
+            token: parse_share_token(trimmed)?,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn parse_share_url(input: &str) -> Result<Option<String>> {
+    let remainder = input
+        .strip_prefix("https://cloud.tsinghua.edu.cn/")
+        .or_else(|| input.strip_prefix("http://cloud.tsinghua.edu.cn/"));
+    let Some(remainder) = remainder else {
+        return Ok(None);
+    };
+
+    let remainder = remainder
+        .split(['#', '?'])
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    let mut parts = remainder.split('/');
+    let kind = parts.next().unwrap_or_default();
+    if kind != "f" && kind != "d" {
+        return Ok(None);
+    }
+
+    let token = parts.next().unwrap_or_default();
+    if token.is_empty() {
+        bail!("share link is missing hashcode");
+    }
+
+    Ok(Some(parse_share_token(token)?))
+}
+
+fn parse_share_token(input: &str) -> Result<String> {
+    let token = input
+        .split(['?', '#', '/'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if token.is_empty() {
+        bail!("share hashcode cannot be empty");
+    }
+    if !token
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        bail!("share hashcode contains unsupported characters");
+    }
+    Ok(token.to_string())
 }
 
 fn resolve_local_destination(local: &Path, remote_path: &str) -> Result<PathBuf> {
@@ -221,12 +337,12 @@ fn resolve_conflict_policy(policy: ConflictPolicy, path: &Path) -> Result<Confli
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use tempfile::tempdir;
 
     use super::{
-        next_available_local_path, resolve_local_destination, resolve_requested_destination,
+        next_available_local_path, parse_share_ref, parse_share_url, resolve_local_destination,
     };
 
     #[test]
@@ -235,13 +351,6 @@ mod tests {
         let destination =
             resolve_local_destination(temp.path(), "/slides/week1.pdf").expect("resolve");
         assert!(destination.ends_with("week1.pdf"));
-    }
-
-    #[test]
-    fn missing_local_destination_defaults_to_remote_filename() {
-        let destination =
-            resolve_requested_destination(None, "/slides/week1.pdf").expect("resolve");
-        assert_eq!(destination, PathBuf::from("week1.pdf"));
     }
 
     #[test]
@@ -261,5 +370,58 @@ mod tests {
         )
         .expect("resolve");
         assert_eq!(resolved, crate::transfer::ConflictPolicy::Uniquify);
+    }
+
+    #[test]
+    fn parses_share_file_url() {
+        let token =
+            parse_share_url("https://cloud.tsinghua.edu.cn/f/abc123XYZ_/").expect("parse url");
+        assert_eq!(token.as_deref(), Some("abc123XYZ_"));
+    }
+
+    #[test]
+    fn parses_share_url_with_dl_query() {
+        let token =
+            parse_share_url("https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1").expect("parse url");
+        assert_eq!(token.as_deref(), Some("abc123XYZ_"));
+    }
+
+    #[test]
+    fn parses_share_url_without_trailing_slash_but_with_dl_query() {
+        let token =
+            parse_share_url("https://cloud.tsinghua.edu.cn/f/abc123XYZ_?dl=1").expect("parse");
+        assert_eq!(token.as_deref(), Some("abc123XYZ_"));
+    }
+
+    #[test]
+    fn parses_http_share_url() {
+        let token = parse_share_url("http://cloud.tsinghua.edu.cn/f/abc123XYZ_/").expect("parse");
+        assert_eq!(token.as_deref(), Some("abc123XYZ_"));
+    }
+
+    #[test]
+    fn parses_directory_share_url() {
+        let token =
+            parse_share_url("https://cloud.tsinghua.edu.cn/d/abc123XYZ_/?dl=1").expect("parse");
+        assert_eq!(token.as_deref(), Some("abc123XYZ_"));
+    }
+
+    #[test]
+    fn parses_share_url_with_fragment() {
+        let token =
+            parse_share_url("https://cloud.tsinghua.edu.cn/f/abc123XYZ_/#/view").expect("parse");
+        assert_eq!(token.as_deref(), Some("abc123XYZ_"));
+    }
+
+    #[test]
+    fn requires_share_flag_for_bare_hashcode() {
+        let shared = parse_share_ref("abc123XYZ_", false).expect("parse");
+        assert_eq!(shared, None);
+    }
+
+    #[test]
+    fn accepts_bare_hashcode_with_share_flag() {
+        let shared = parse_share_ref("abc123XYZ_", true).expect("parse");
+        assert_eq!(shared.expect("shared").token, "abc123XYZ_".to_string());
     }
 }

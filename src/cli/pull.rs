@@ -11,7 +11,7 @@ pub fn build_command() -> Command {
         .visible_alias("pull")
         .arg(
             Arg::new("remote")
-                .help("Remote file path in repo:<library>/<path> form or default-repo shorthand")
+                .help("Remote file path, share URL, or share hashcode")
                 .required(true),
         )
         .arg(
@@ -32,6 +32,12 @@ pub fn build_command() -> Command {
                 .value_name("N")
                 .help("Number of parallel download workers")
                 .value_parser(value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("share")
+                .long("share")
+                .help("Interpret the remote argument as a share hashcode or share URL")
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("conflict")
@@ -78,10 +84,12 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
         .transpose()?
         .unwrap_or(crate::transfer::DownloadMode::Auto);
     let workers = matches.get_one::<usize>("workers").copied().unwrap_or(4);
+    let from_share = matches.get_flag("share");
 
     let result = app.pull_service.pull(
         remote,
         local.as_deref(),
+        from_share,
         conflict_policy,
         download_mode,
         workers,
@@ -93,9 +101,8 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
         app.renderer.write_line(
             &mut stdout,
             &format!(
-                "Downloaded {}{} to {}{}",
-                result.repo,
-                result.remote_path,
+                "Downloaded {} to {}{}",
+                result.source,
                 result.local_path,
                 if result.uniquified {
                     " (uniquified)"

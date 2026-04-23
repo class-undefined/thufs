@@ -43,6 +43,8 @@ cargo install thufs
 thufs --help
 ```
 
+The minimum supported Rust version is `1.85`.
+
 You can also build from source:
 
 ```bash
@@ -51,6 +53,8 @@ cd thufs
 cargo build --release
 ./target/release/thufs --help
 ```
+
+On macOS, you can also download the prebuilt binary archive for your CPU architecture from GitHub Releases.
 
 If Rust downloads are slow in your network environment:
 
@@ -208,11 +212,15 @@ Download a file:
 thufs download repo:course-lib/slides/week1.pdf
 thufs download repo:course-lib/slides/week1.pdf ./week1.pdf
 thufs download repo:course-lib/slides/week1.pdf ./downloads/
+thufs download https://cloud.tsinghua.edu.cn/f/abc123XYZ_/
+thufs download "https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1"
+thufs download --share abc123XYZ_
 thufs download --mode sequential repo:course-lib/slides/week1.pdf
 thufs download --mode parallel --workers 8 repo:course-lib/slides/week1.pdf
 ```
 
 If the local path is omitted, `download` saves into the current directory using the remote file name.
+Public shared files are also supported: pass a full share URL, and query strings like `?dl=1` are ignored so only the token is used, or use `--share <hashcode>`.
 
 Create a share link:
 

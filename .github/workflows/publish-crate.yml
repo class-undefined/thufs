@@ -90,6 +90,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
@@ -106,6 +110,18 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release --verbose
+
+      - name: Package macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          asset="thufs-${version}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp target/release/thufs dist/thufs
+          tar -C dist -czf "dist/${asset}" thufs
+          rm dist/thufs
+          shasum -a 256 "dist/${asset}" > "dist/${asset}.sha256"
 
       - name: Package Linux binary
         if: runner.os == 'Linux'
@@ -166,6 +182,12 @@ jobs:
           version="${release_tag#v}"
           {
             echo "## thufs ${version}"
+            echo
+            echo "Highlights:"
+            echo
+            echo "- download now accepts THU Cloud share URLs and \`--share <hashcode>\`, and ignores query strings like \`?dl=1\` when extracting the token"
+            echo "- minimum supported Rust version is now 1.85, with CI coverage to keep that floor stable"
+            echo "- GitHub Releases include prebuilt macOS archives for Apple Silicon and Intel"
             echo
             echo "Install from crates.io:"
             echo

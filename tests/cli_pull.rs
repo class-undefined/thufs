@@ -10,6 +10,7 @@ fn download_help_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Download a remote file"))
+        .stdout(predicate::str::contains("--share"))
         .stdout(predicate::str::contains("--conflict"))
         .stdout(predicate::str::contains("--mode"))
         .stdout(predicate::str::contains("--workers"));
@@ -27,9 +28,9 @@ fn download_fails_when_local_destination_exists_with_fail_policy() {
         .args([
             "download",
             "slides/week1.pdf",
+            destination.to_str().expect("utf8"),
             "--conflict",
             "fail",
-            destination.to_str().expect("utf8"),
         ])
         .assert()
         .failure()
@@ -57,4 +58,33 @@ fn pull_alias_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Download a remote file"));
+}
+
+#[test]
+fn download_share_hash_without_flag_is_treated_as_remote_path() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::cargo_bin("thufs")
+        .expect("binary")
+        .env("THUFS_CONFIG_DIR", temp.path())
+        .args(["download", "abc123XYZ_"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("remote path must use repo:"));
+}
+
+#[test]
+fn download_share_hash_with_flag_reaches_share_flow() {
+    let temp = tempdir().expect("tempdir");
+
+    Command::cargo_bin("thufs")
+        .expect("binary")
+        .env("THUFS_CONFIG_DIR", temp.path())
+        .args(["download", "--share", "abc123XYZ_"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("failed to inspect shared file")
+                .or(predicate::str::contains("shared file")),
+        );
 }

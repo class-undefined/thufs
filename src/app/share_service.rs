@@ -176,10 +176,10 @@ impl ShareService {
 }
 
 fn share_url(share: &ShareLink, path: &str) -> String {
-    if let Some(link) = &share.link
-        && !link.is_empty()
-    {
-        return link.clone();
+    if let Some(link) = &share.link {
+        if !link.is_empty() {
+            return link.clone();
+        }
     }
 
     let token = share.token.as_deref().unwrap_or_default();

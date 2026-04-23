@@ -143,6 +143,13 @@ struct DownloadSupport {
     accepts_ranges: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedFileDownload {
+    pub token: String,
+    pub file_name: String,
+    pub download_link: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SeafileClient {
@@ -366,6 +373,45 @@ impl SeafileClient {
         )
     }
 
+    pub fn inspect_shared_file(&self, token: &str) -> Result<SharedFileDownload> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            let download_link = format!("{}/f/{token}/?dl=1", self.base_url());
+            let response = self
+                .http
+                .get(&download_link)
+                .header(header::RANGE, "bytes=0-0")
+                .send()
+                .await
+                .context("failed to inspect shared file")?;
+
+            let status = response.status();
+            if status != StatusCode::OK && status != StatusCode::PARTIAL_CONTENT {
+                response
+                    .error_for_status()
+                    .context("shared file request failed")?;
+                bail!("shared file request returned unexpected status {status}");
+            }
+
+            let file_name = response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_filename_from_content_disposition)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "failed to infer shared filename from server response; the share may require a password or may not point to a file"
+                    )
+                })?;
+
+            Ok(SharedFileDownload {
+                token: token.to_string(),
+                file_name,
+                download_link,
+            })
+        })
+    }
+
     pub fn upload_file(
         &self,
         repo_id: &str,
@@ -530,27 +576,27 @@ impl SeafileClient {
             match mode {
                 DownloadMode::Sequential => {}
                 DownloadMode::Auto | DownloadMode::Parallel => {
-                    if existing_bytes == 0
-                        && let Some(support) = self.probe_download_support(download_link).await?
-                        && support.accepts_ranges
-                    {
-                        if support.total_bytes >= PARALLEL_DOWNLOAD_THRESHOLD {
-                            return self
-                                .download_file_parallel(
-                                    download_link,
-                                    destination,
-                                    support.total_bytes,
-                                    workers,
-                                )
-                                .await;
+                    if existing_bytes == 0 {
+                        if let Some(support) = self.probe_download_support(download_link).await? {
+                            if support.accepts_ranges
+                                && support.total_bytes >= PARALLEL_DOWNLOAD_THRESHOLD
+                            {
+                                return self
+                                    .download_file_parallel(
+                                        download_link,
+                                        destination,
+                                        support.total_bytes,
+                                        workers,
+                                    )
+                                    .await;
+                            }
+                            if mode == DownloadMode::Parallel && !support.accepts_ranges {
+                                bail!(
+                                    "parallel download was requested but the remote endpoint does not support ranged download"
+                                );
+                            }
                         }
                     } else if mode == DownloadMode::Parallel {
-                        bail!(
-                            "parallel download was requested but the remote endpoint does not support ranged download"
-                        );
-                    }
-
-                    if mode == DownloadMode::Parallel && existing_bytes > 0 {
                         bail!(
                             "parallel download was requested but resumable partial files must continue in sequential mode"
                         );
@@ -959,6 +1005,55 @@ fn parse_total_bytes_from_content_range(header_value: &str) -> Option<u64> {
         .and_then(|(_, total)| total.parse::<u64>().ok())
 }
 
+fn parse_filename_from_content_disposition(value: &str) -> Option<String> {
+    value
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| {
+            part.strip_prefix("filename*=UTF-8''")
+                .or_else(|| part.strip_prefix("filename=\""))
+                .or_else(|| part.strip_prefix("filename="))
+                .map(|name| name.trim_end_matches('"'))
+        })
+        .map(percent_decode)
+        .filter(|name| !name.is_empty())
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+
+        decoded.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn split_download_ranges(total_bytes: u64, parts: usize) -> Vec<(u64, u64)> {
     if total_bytes == 0 {
         return Vec::new();
@@ -1034,7 +1129,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        Repository, SeafileClient, parse_total_bytes_from_content_range, split_download_ranges,
+        Repository, SeafileClient, parse_filename_from_content_disposition,
+        parse_total_bytes_from_content_range, split_download_ranges,
     };
     use crate::{
         config::{Config, ConfigManager, OutputMode},
@@ -1120,6 +1216,14 @@ mod tests {
             Some(12345)
         );
         assert_eq!(parse_total_bytes_from_content_range("invalid"), None);
+    }
+
+    #[test]
+    fn parses_content_disposition_filename() {
+        let parsed = parse_filename_from_content_disposition(
+            "attachment; filename*=UTF-8''week1%20notes.pdf",
+        );
+        assert_eq!(parsed.as_deref(), Some("week1 notes.pdf"));
     }
 
     #[test]

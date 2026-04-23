@@ -61,6 +61,8 @@ cargo install thufs
 thufs --help
 ```
 
+当前最低支持 Rust 版本为 `1.85`。
+
 也可以从源码构建：
 
 ```bash
@@ -69,6 +71,8 @@ cd thufs
 cargo build --release
 ./target/release/thufs --help
 ```
+
+macOS 用户也可以直接下载 GitHub Release 中对应架构的预编译二进制包。
 
 如果你的网络环境访问 Rust 官方源较慢，可使用国内镜像：
 
@@ -241,6 +245,9 @@ thufs mkdir submissions/week1
 thufs download repo:course-lib/slides/week1.pdf
 thufs download repo:course-lib/slides/week1.pdf ./week1.pdf
 thufs download repo:course-lib/slides/week1.pdf ./downloads/
+thufs download https://cloud.tsinghua.edu.cn/f/abc123XYZ_/
+thufs download "https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1"
+thufs download --share abc123XYZ_
 thufs download --mode sequential repo:course-lib/slides/week1.pdf
 thufs download --mode parallel --workers 8 repo:course-lib/slides/week1.pdf
 ```
@@ -249,6 +256,7 @@ thufs download --mode parallel --workers 8 repo:course-lib/slides/week1.pdf
 
 - 如果不写本地路径，默认保存到当前目录，并使用远程文件名
 - 如果本地路径是已存在目录，则下载到该目录下并沿用远程文件名
+- 也支持公开分享文件下载：可直接传完整分享链接，`?dl=1` 这类查询参数会被忽略，只提取其中的 token；或使用 `--share <hashcode>`
 - `pull` 是 `download` 的兼容别名
 
 ### 创建分享链接
