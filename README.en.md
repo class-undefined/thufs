@@ -39,11 +39,11 @@ Instead of being a heavy sync client, `thufs` is designed for SSH sessions, remo
 Install it with Cargo:
 
 ```bash
-cargo install thufs
+cargo install thufs --locked
 thufs --help
 ```
 
-The minimum supported Rust version is `1.85`.
+The minimum supported Rust version is `1.85`. If plain `cargo install thufs` resolves dependencies that require a newer Rust version, use `--locked`.
 
 You can also build from source:
 

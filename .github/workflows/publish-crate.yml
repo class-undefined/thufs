@@ -192,7 +192,7 @@ jobs:
             echo "Install from crates.io:"
             echo
             echo '```bash'
-            echo "cargo install thufs --version ${version}"
+            echo "cargo install thufs --version ${version} --locked"
             echo '```'
             echo
             echo "Crate: https://crates.io/crates/thufs/${version}"

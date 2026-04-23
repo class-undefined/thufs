@@ -57,11 +57,11 @@
 直接通过 Cargo 安装：
 
 ```bash
-cargo install thufs
+cargo install thufs --locked
 thufs --help
 ```
 
-当前最低支持 Rust 版本为 `1.85`。
+当前最低支持 Rust 版本为 `1.85`。如果直接 `cargo install thufs` 遇到依赖解析到更高 Rust 版本的问题，请使用 `--locked`。
 
 也可以从源码构建：
 
