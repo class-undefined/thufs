@@ -257,7 +257,8 @@ thufs download --mode parallel --workers 8 repo:course-lib/slides/week1.pdf
 
 - 如果不写本地路径，默认保存到当前目录，并使用远程文件名
 - 如果本地路径是已存在目录，则下载到该目录下并沿用远程文件名
-- 也支持公开分享文件下载：可直接传完整分享链接，`?dl=1` 这类查询参数会被忽略，只提取其中的 token；或使用 `--share <hashcode>`
+- 也支持分享文件下载：可直接传完整分享链接，`?dl=1` 这类查询参数会被忽略，只提取其中的 token；或使用 `--share <hashcode>`
+- 分享下载会根据当前登录状态决定身份：已配置 token 时会携带登录身份，未登录时按匿名下载处理，便于访问需要身份授权的分享链接
 - `pull` 是 `download` 的兼容别名
 
 ### 创建分享链接
@@ -343,7 +344,8 @@ echo "saved to: $FINAL_PATH"
 - `--progress jsonl` 会向 stderr 持续输出 JSON Lines 进度事件，适合 GUI、任务队列和脚本精确追踪百分比
 - `--progress none` 可关闭传输进度输出
 - `download` 会使用 `.thufs-part` 临时文件，并在服务器支持时尝试断点续传
-- `download` 默认优先尝试并发分片下载；若服务端不支持 Range 或当前处于续传场景，则自动回退到单线程下载
+- `download` 默认优先尝试并发分片下载；若自动模式下的 Range 分片请求失败，会清理临时文件并回退到单线程下载
+- 自动回退会按进度模式报告为 warning：TTY 模式显示警告，`--progress jsonl` 输出 `warning` 事件，`--progress none` 保持静默；显式 `--mode parallel` 仍会严格失败
 - `upload` 会基于 Seafile 的 uploaded-bytes 机制进行尽力续传
 
 机器可读进度示例：

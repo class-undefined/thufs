@@ -183,16 +183,17 @@ jobs:
             echo
             echo "Highlights:"
             echo
-            echo "- upload/download now expose \`--progress <MODE>\` in help"
-            echo "- \`--progress jsonl\` streams machine-readable JSON Lines progress events to stderr for GUI integrations, task queues, and scripts"
-            echo "- progress events include \`event\`, \`operation\`, \`path\`, \`transferred_bytes\`, \`total_bytes\`, and \`percent\`"
-            echo "- \`--progress auto\` preserves the existing TTY progress bar behavior, while \`--progress none\` disables progress output"
+            echo "- private repository downloads now authenticate the actual file and range requests, not only the download-link lookup"
+            echo "- share-link downloads use the configured login identity when a token is available, and fall back to anonymous access when it is not"
+            echo "- automatic downloads now fall back from failed parallel Range requests to sequential download instead of aborting the command"
+            echo "- automatic fallback is reported as a warning; \`--progress jsonl\` emits a machine-readable warning event and \`--progress none\` stays quiet"
+            echo "- explicit \`--mode parallel\` remains strict and still fails when a range request cannot be completed"
             echo
             echo "Example:"
             echo
             echo '```bash'
-            echo "thufs upload ./a.zip repo:course/a.zip --progress jsonl"
             echo "thufs download repo:course/a.zip ./a.zip --progress jsonl"
+            echo "thufs download https://cloud.tsinghua.edu.cn/f/abc123XYZ_/ ./a.zip"
             echo '```'
             echo
             echo "Install from crates.io:"
