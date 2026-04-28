@@ -11,7 +11,9 @@ fn upload_help_is_available() {
         .success()
         .stdout(predicate::str::contains("Upload a local file"))
         .stdout(predicate::str::contains("remote directory"))
-        .stdout(predicate::str::contains("--conflict"));
+        .stdout(predicate::str::contains("--conflict"))
+        .stdout(predicate::str::contains("--progress"))
+        .stdout(predicate::str::contains("jsonl"));
 }
 
 #[test]

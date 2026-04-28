@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    io::{Error as IoError, ErrorKind, SeekFrom},
+    path::Path,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
@@ -8,14 +11,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
     fs,
-    io::{self, AsyncWriteExt},
+    io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     runtime::Runtime,
 };
 
 use crate::{
     config::ConfigManager,
     contract::{RemoteRef, ResolvedRemoteRef},
-    transfer::{DownloadMode, create_progress_bar},
+    transfer::{DownloadMode, ProgressMode, ProgressReporter, create_progress_reporter},
 };
 
 const THU_CLOUD_BASE_URL: &str = "https://cloud.tsinghua.edu.cn";
@@ -421,6 +424,7 @@ impl SeafileClient {
         target_name: &str,
         replace: bool,
         total_bytes: u64,
+        progress_mode: ProgressMode,
     ) -> Result<UploadedFile> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
@@ -428,20 +432,21 @@ impl SeafileClient {
                 .uploaded_bytes(repo_id, parent_dir, target_name)
                 .await
                 .unwrap_or(0);
-            let content = fs::read(local_path)
-                .await
-                .with_context(|| format!("failed to read {}", local_path.display()))?;
-            let start = uploaded_bytes.min(content.len() as u64) as usize;
+            let start = uploaded_bytes.min(total_bytes);
 
-            let progress = create_progress_bar(Some(total_bytes));
-            if let Some(progress) = &progress {
-                progress.set_position(uploaded_bytes);
-                progress.set_message(format!("upload {}", local_path.display()));
-            }
+            let progress = create_progress_reporter(
+                progress_mode,
+                "upload",
+                local_path.display().to_string(),
+                Some(total_bytes),
+            )?;
+            progress.set_position(start)?;
+            progress.set_message(format!("upload {}", local_path.display()));
 
             let response = if uploaded_bytes > 0 {
-                let part = reqwest::multipart::Part::bytes(content[start..].to_vec())
-                    .file_name(target_name.to_string());
+                let part =
+                    progress_file_part(local_path, target_name.to_string(), start, &progress)
+                        .await?;
                 let form = reqwest::multipart::Form::new()
                     .part("file", part)
                     .text("parent_dir", parent_dir.to_string())
@@ -455,8 +460,8 @@ impl SeafileClient {
                         format!(
                             "bytes {}-{}/{}",
                             start,
-                            content.len().saturating_sub(1),
-                            content.len()
+                            total_bytes.saturating_sub(1),
+                            total_bytes
                         ),
                     )
                     .header(
@@ -471,7 +476,7 @@ impl SeafileClient {
                     .context("resumable upload request failed")?
             } else {
                 let part =
-                    reqwest::multipart::Part::bytes(content).file_name(target_name.to_string());
+                    progress_file_part(local_path, target_name.to_string(), 0, &progress).await?;
                 let form = reqwest::multipart::Form::new()
                     .part("file", part)
                     .text("parent_dir", parent_dir.to_string())
@@ -488,9 +493,7 @@ impl SeafileClient {
                     .context("upload request failed")?
             };
 
-            if let Some(progress) = &progress {
-                progress.finish_with_message(format!("upload {} complete", local_path.display()));
-            }
+            progress.finish_with_message(format!("upload {} complete", local_path.display()))?;
 
             let uploaded = response
                 .json::<Vec<UploadedFile>>()
@@ -509,27 +512,29 @@ impl SeafileClient {
         local_path: &Path,
         target_file: &str,
         total_bytes: u64,
+        progress_mode: ProgressMode,
     ) -> Result<UploadedFile> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
-            let content = fs::read(local_path)
-                .await
-                .with_context(|| format!("failed to read {}", local_path.display()))?;
             let file_name = local_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("upload.bin")
                 .to_string();
-            let part = reqwest::multipart::Part::bytes(content).file_name(file_name);
+
+            let progress = create_progress_reporter(
+                progress_mode,
+                "upload",
+                local_path.display().to_string(),
+                Some(total_bytes),
+            )?;
+            progress.set_position(0)?;
+            progress.set_message(format!("upload {}", local_path.display()));
+
+            let part = progress_file_part(local_path, file_name, 0, &progress).await?;
             let form = reqwest::multipart::Form::new()
                 .part("file", part)
                 .text("target_file", target_file.to_string());
-
-            let progress = create_progress_bar(Some(total_bytes));
-            if let Some(progress) = &progress {
-                progress.set_position(0);
-                progress.set_message(format!("upload {}", local_path.display()));
-            }
 
             let response = self
                 .http
@@ -542,9 +547,7 @@ impl SeafileClient {
                 .error_for_status()
                 .context("update request failed")?;
 
-            if let Some(progress) = &progress {
-                progress.finish_with_message(format!("upload {} complete", local_path.display()));
-            }
+            progress.finish_with_message(format!("upload {} complete", local_path.display()))?;
 
             let uploaded = response
                 .json::<Vec<UploadedFile>>()
@@ -564,6 +567,7 @@ impl SeafileClient {
         destination: &Path,
         mode: DownloadMode,
         workers: usize,
+        progress_mode: ProgressMode,
     ) -> Result<u64> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
@@ -587,6 +591,7 @@ impl SeafileClient {
                                         destination,
                                         support.total_bytes,
                                         workers,
+                                        progress_mode,
                                     )
                                     .await;
                             }
@@ -604,7 +609,7 @@ impl SeafileClient {
                 }
             }
 
-            self.download_file_sequential(download_link, destination, existing_bytes)
+            self.download_file_sequential(download_link, destination, existing_bytes, progress_mode)
                 .await
         })
     }
@@ -653,19 +658,23 @@ impl SeafileClient {
         destination: &Path,
         total_bytes: u64,
         requested_parts: usize,
+        progress_mode: ProgressMode,
     ) -> Result<u64> {
         let ranges = split_download_ranges(total_bytes, requested_parts.max(1));
         if ranges.len() <= 1 {
             return self
-                .download_file_sequential(download_link, destination, 0)
+                .download_file_sequential(download_link, destination, 0, progress_mode)
                 .await;
         }
 
-        let progress = create_progress_bar(Some(total_bytes));
-        if let Some(progress) = &progress {
-            progress.set_position(0);
-            progress.set_message(format!("download {}", destination.display()));
-        }
+        let progress = create_progress_reporter(
+            progress_mode,
+            "download",
+            destination.display().to_string(),
+            Some(total_bytes),
+        )?;
+        progress.set_position(0)?;
+        progress.set_message(format!("download {}", destination.display()));
 
         let tasks = ranges.iter().enumerate().map(|(index, (start, end))| {
             let client = self.http.clone();
@@ -700,9 +709,7 @@ impl SeafileClient {
                     file.write_all(&chunk)
                         .await
                         .with_context(|| format!("failed to write {}", part_path.display()))?;
-                    if let Some(progress) = &progress {
-                        progress.inc(chunk.len() as u64);
-                    }
+                    progress.inc(chunk.len() as u64)?;
                 }
                 file.flush()
                     .await
@@ -741,9 +748,7 @@ impl SeafileClient {
                 .with_context(|| format!("failed to remove {}", part_path.display()))?;
         }
 
-        if let Some(progress) = &progress {
-            progress.finish_with_message(format!("download {} complete", destination.display()));
-        }
+        progress.finish_with_message(format!("download {} complete", destination.display()))?;
 
         Ok(total_bytes)
     }
@@ -753,6 +758,7 @@ impl SeafileClient {
         download_link: &str,
         destination: &Path,
         existing_bytes: u64,
+        progress_mode: ProgressMode,
     ) -> Result<u64> {
         let response = self
             .http
@@ -769,11 +775,14 @@ impl SeafileClient {
         let initial_bytes = if resumed { existing_bytes } else { 0 };
 
         let total = response.content_length().map(|len| len + initial_bytes);
-        let progress = create_progress_bar(total);
-        if let Some(progress) = &progress {
-            progress.set_position(initial_bytes);
-            progress.set_message(format!("download {}", destination.display()));
-        }
+        let progress = create_progress_reporter(
+            progress_mode,
+            "download",
+            destination.display().to_string(),
+            total,
+        )?;
+        progress.set_position(initial_bytes)?;
+        progress.set_message(format!("download {}", destination.display()));
 
         let mut stream = response.bytes_stream();
         let mut file = if resumed {
@@ -801,17 +810,13 @@ impl SeafileClient {
                 .await
                 .with_context(|| format!("failed to write {}", destination.display()))?;
             written += chunk.len() as u64;
-            if let Some(progress) = &progress {
-                progress.set_position(written);
-            }
+            progress.set_position(written)?;
         }
 
         file.flush()
             .await
             .with_context(|| format!("failed to flush {}", destination.display()))?;
-        if let Some(progress) = &progress {
-            progress.finish_with_message(format!("download {} complete", destination.display()));
-        }
+        progress.finish_with_message(format!("download {} complete", destination.display()))?;
         Ok(written)
     }
 
@@ -1087,6 +1092,49 @@ async fn cleanup_download_parts(destination: &Path, count: usize) {
         let path = part_download_path(destination, index);
         let _ = fs::remove_file(path).await;
     }
+}
+
+async fn progress_file_part(
+    local_path: &Path,
+    file_name: String,
+    start: u64,
+    progress: &ProgressReporter,
+) -> Result<reqwest::multipart::Part> {
+    let mut file = fs::File::open(local_path)
+        .await
+        .with_context(|| format!("failed to open {}", local_path.display()))?;
+    if start > 0 {
+        file.seek(SeekFrom::Start(start))
+            .await
+            .with_context(|| format!("failed to seek {}", local_path.display()))?;
+    }
+    let total = file
+        .metadata()
+        .await
+        .with_context(|| format!("failed to inspect {}", local_path.display()))?
+        .len();
+    let remaining = total.saturating_sub(start);
+    let progress = progress.clone();
+    let stream = futures_util::stream::try_unfold(file, move |mut file| {
+        let progress = progress.clone();
+        async move {
+            let mut buffer = vec![0u8; 64 * 1024];
+            let read = file.read(&mut buffer).await?;
+            if read == 0 {
+                return Ok::<_, IoError>(None);
+            }
+            buffer.truncate(read);
+            progress
+                .inc(read as u64)
+                .map_err(|err| IoError::new(ErrorKind::Other, err))?;
+            Ok(Some((buffer, file)))
+        }
+    });
+
+    Ok(
+        reqwest::multipart::Part::stream_with_length(reqwest::Body::wrap_stream(stream), remaining)
+            .file_name(file_name),
+    )
 }
 
 fn parse_directory_entries(dir_path: &str, payload: Value) -> Result<Vec<DirectoryEntry>> {

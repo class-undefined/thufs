@@ -10,7 +10,7 @@ use crate::{
     config::ConfigManager,
     contract::RemoteRef,
     seafile::SeafileClient,
-    transfer::{ConflictPolicy, DownloadMode},
+    transfer::{ConflictPolicy, DownloadMode, ProgressMode},
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -47,6 +47,7 @@ impl PullService {
         policy: ConflictPolicy,
         download_mode: DownloadMode,
         workers: usize,
+        progress_mode: ProgressMode,
     ) -> Result<PullResult> {
         let local_requires_remote_name = local.is_none() || local.is_some_and(|path| path.is_dir());
         let target = if local_requires_remote_name {
@@ -102,9 +103,13 @@ impl PullService {
         };
 
         let temp_path = temporary_download_path(&destination)?;
-        let bytes_written =
-            self.client
-                .download_file(&target.download_link, &temp_path, download_mode, workers)?;
+        let bytes_written = self.client.download_file(
+            &target.download_link,
+            &temp_path,
+            download_mode,
+            workers,
+            progress_mode,
+        )?;
         if overwritten && destination.exists() {
             std::fs::remove_file(&destination).with_context(|| {
                 format!(

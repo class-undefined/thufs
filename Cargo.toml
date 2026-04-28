@@ -1,6 +1,6 @@
 [package]
 name = "thufs"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 rust-version = "1.85"
 description = "Shell-first THU Cloud Drive CLI"
@@ -18,7 +18,7 @@ indicatif = "0.17"
 reqwest = { version = "=0.12.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.43", features = ["fs", "macros", "rt-multi-thread"] }
+tokio = { version = "1.43", features = ["fs", "io-util", "macros", "rt-multi-thread"] }
 # Keep cargo install on Rust 1.85 from resolving url/idna to newer ICU-backed releases.
 url = "=2.5.0"
 

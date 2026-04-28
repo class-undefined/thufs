@@ -10,7 +10,7 @@ use crate::{
     config::ConfigManager,
     contract::RemoteRef,
     seafile::{EntryKind, SeafileClient},
-    transfer::ConflictPolicy,
+    transfer::{ConflictPolicy, ProgressMode},
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -38,7 +38,13 @@ impl PushService {
         Self { config, client }
     }
 
-    pub fn push(&self, local: &Path, remote: &str, policy: ConflictPolicy) -> Result<PushResult> {
+    pub fn push(
+        &self,
+        local: &Path,
+        remote: &str,
+        policy: ConflictPolicy,
+        progress_mode: ProgressMode,
+    ) -> Result<PushResult> {
         self.validate_local_source(local)?;
 
         let resolved_config = self.config.load_resolved()?;
@@ -90,6 +96,7 @@ impl PushService {
                             local,
                             &final_remote_path,
                             metadata.len(),
+                            progress_mode,
                         )?
                     }
                     ConflictPolicy::Uniquify => {
@@ -106,6 +113,7 @@ impl PushService {
                             &final_target_name,
                             false,
                             metadata.len(),
+                            progress_mode,
                         )?
                     }
                     ConflictPolicy::Fail | ConflictPolicy::Prompt => {
@@ -126,6 +134,7 @@ impl PushService {
                     &final_target_name,
                     false,
                     metadata.len(),
+                    progress_mode,
                 )?
             }
         };
@@ -320,7 +329,12 @@ mod tests {
         let (temp, service) = make_service();
         let missing = temp.path().join("missing.txt");
         let err = service
-            .push(&missing, "repo:course-lib/a.txt", ConflictPolicy::Fail)
+            .push(
+                &missing,
+                "repo:course-lib/a.txt",
+                ConflictPolicy::Fail,
+                crate::transfer::ProgressMode::None,
+            )
             .expect_err("should fail");
         assert!(err.to_string().contains("does not exist"));
     }

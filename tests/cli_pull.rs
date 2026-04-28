@@ -13,7 +13,9 @@ fn download_help_is_available() {
         .stdout(predicate::str::contains("--share"))
         .stdout(predicate::str::contains("--conflict"))
         .stdout(predicate::str::contains("--mode"))
-        .stdout(predicate::str::contains("--workers"));
+        .stdout(predicate::str::contains("--workers"))
+        .stdout(predicate::str::contains("--progress"))
+        .stdout(predicate::str::contains("jsonl"));
 }
 
 #[test]
