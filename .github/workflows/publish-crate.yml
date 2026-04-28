@@ -183,9 +183,17 @@ jobs:
             echo
             echo "Highlights:"
             echo
-            echo "- download now accepts THU Cloud share URLs and \`--share <hashcode>\`, and ignores query strings like \`?dl=1\` when extracting the token"
-            echo "- minimum supported Rust version is now 1.85, with CI coverage to keep that floor stable"
-            echo "- GitHub Releases include a prebuilt macOS archive for Apple Silicon; Intel Macs should use cargo install"
+            echo "- upload/download now expose \`--progress <MODE>\` in help"
+            echo "- \`--progress jsonl\` streams machine-readable JSON Lines progress events to stderr for GUI integrations, task queues, and scripts"
+            echo "- progress events include \`event\`, \`operation\`, \`path\`, \`transferred_bytes\`, \`total_bytes\`, and \`percent\`"
+            echo "- \`--progress auto\` preserves the existing TTY progress bar behavior, while \`--progress none\` disables progress output"
+            echo
+            echo "Example:"
+            echo
+            echo '```bash'
+            echo "thufs upload ./a.zip repo:course/a.zip --progress jsonl"
+            echo "thufs download repo:course/a.zip ./a.zip --progress jsonl"
+            echo '```'
             echo
             echo "Install from crates.io:"
             echo

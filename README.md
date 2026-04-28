@@ -34,6 +34,7 @@
 - `mkdir` 主动创建远程目录，并自动创建父目录
 - `push` 和 `pull` 作为兼容别名保留
 - 上传和下载在 TTY 下显示进度条
+- 上传和下载支持 `--progress jsonl`，向 stderr 输出机器可读的流式进度事件
 - 上传和下载尽力支持断点续传
 - 冲突策略统一为 `--conflict`
 - 默认冲突策略为 `uniquify`，避免静默覆盖
@@ -339,9 +340,27 @@ echo "saved to: $FINAL_PATH"
 ## 传输体验
 
 - 在 stderr 为 TTY 时显示进度条
+- `--progress jsonl` 会向 stderr 持续输出 JSON Lines 进度事件，适合 GUI、任务队列和脚本精确追踪百分比
+- `--progress none` 可关闭传输进度输出
 - `download` 会使用 `.thufs-part` 临时文件，并在服务器支持时尝试断点续传
 - `download` 默认优先尝试并发分片下载；若服务端不支持 Range 或当前处于续传场景，则自动回退到单线程下载
 - `upload` 会基于 Seafile 的 uploaded-bytes 机制进行尽力续传
+
+机器可读进度示例：
+
+```bash
+thufs upload ./report.pdf repo:course-lib/submissions/report.pdf --progress jsonl
+thufs download repo:course-lib/slides/week1.pdf ./week1.pdf --progress jsonl
+```
+
+每行都是一个独立 JSON 事件，包含：
+
+- `event`
+- `operation`
+- `path`
+- `transferred_bytes`
+- `total_bytes`
+- `percent`
 
 下载模式可通过以下参数显式控制：
 

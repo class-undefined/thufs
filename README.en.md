@@ -27,6 +27,7 @@ Instead of being a heavy sync client, `thufs` is designed for SSH sessions, remo
 - `mkdir` to create remote directories recursively
 - `push` and `pull` kept as compatibility aliases
 - progress bars on TTY
+- `--progress jsonl` for machine-readable streaming progress events on stderr
 - best-effort resumable upload and download
 - unified `--conflict` strategy
 - default conflict behavior is `uniquify`
@@ -290,9 +291,27 @@ echo "saved to: $FINAL_PATH"
 ## Transfer Behavior
 
 - progress bars are shown when stderr is a TTY
+- `--progress jsonl` streams JSON Lines progress events to stderr for GUIs, task queues, and scripts that need precise transfer percentages
+- `--progress none` disables transfer progress output
 - `download` uses `.thufs-part` temporary files and resumes when the server supports range requests
 - `download` prefers parallel ranged download by default and automatically falls back to sequential mode when the endpoint or current resume state does not allow it
 - `upload` performs best-effort resume using Seafile's uploaded-bytes mechanism
+
+Machine-readable progress examples:
+
+```bash
+thufs upload ./report.pdf repo:course-lib/submissions/report.pdf --progress jsonl
+thufs download repo:course-lib/slides/week1.pdf ./week1.pdf --progress jsonl
+```
+
+Each line is a standalone JSON event with:
+
+- `event`
+- `operation`
+- `path`
+- `transferred_bytes`
+- `total_bytes`
+- `percent`
 
 Download mode can also be controlled explicitly:
 
