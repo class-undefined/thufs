@@ -146,6 +146,12 @@ struct DownloadSupport {
     accepts_ranges: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadAuth {
+    Required,
+    Optional,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedFileDownload {
     pub token: String,
@@ -183,6 +189,26 @@ impl SeafileClient {
             .context("failed to build Authorization header")?;
         header.set_sensitive(true);
         Ok(header)
+    }
+
+    fn optional_auth_header_value(&self) -> Result<Option<header::HeaderValue>> {
+        let config = self.config.load_resolved()?;
+        let Some(token) = config.token else {
+            return Ok(None);
+        };
+
+        let value = format!("Token {token}");
+        let mut header = header::HeaderValue::from_str(&value)
+            .context("failed to build Authorization header")?;
+        header.set_sensitive(true);
+        Ok(Some(header))
+    }
+
+    fn download_auth_header(&self, auth: DownloadAuth) -> Result<Option<header::HeaderValue>> {
+        match auth {
+            DownloadAuth::Required => Ok(Some(self.auth_header_value()?)),
+            DownloadAuth::Optional => self.optional_auth_header_value(),
+        }
     }
 
     pub fn resolve_remote_ref(
@@ -383,6 +409,7 @@ impl SeafileClient {
             let response = self
                 .http
                 .get(&download_link)
+                .with_download_auth(self, DownloadAuth::Optional)?
                 .header(header::RANGE, "bytes=0-0")
                 .send()
                 .await
@@ -568,6 +595,7 @@ impl SeafileClient {
         mode: DownloadMode,
         workers: usize,
         progress_mode: ProgressMode,
+        auth: DownloadAuth,
     ) -> Result<u64> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
@@ -581,19 +609,39 @@ impl SeafileClient {
                 DownloadMode::Sequential => {}
                 DownloadMode::Auto | DownloadMode::Parallel => {
                     if existing_bytes == 0 {
-                        if let Some(support) = self.probe_download_support(download_link).await? {
+                        if let Some(support) = self
+                            .probe_download_support(download_link, auth)
+                            .await?
+                        {
                             if support.accepts_ranges
                                 && support.total_bytes >= PARALLEL_DOWNLOAD_THRESHOLD
                             {
-                                return self
+                                match self
                                     .download_file_parallel(
                                         download_link,
                                         destination,
                                         support.total_bytes,
                                         workers,
                                         progress_mode,
+                                        auth,
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    Ok(bytes) => return Ok(bytes),
+                                    Err(err) if mode == DownloadMode::Auto => {
+                                        let _ = fs::remove_file(destination).await;
+                                        create_progress_reporter(
+                                            progress_mode,
+                                            "download",
+                                            destination.display().to_string(),
+                                            Some(support.total_bytes),
+                                        )?
+                                        .warning(format!(
+                                            "parallel download attempt failed; falling back to sequential download: {err}"
+                                        ))?;
+                                    }
+                                    Err(err) => return Err(err),
+                                }
                             }
                             if mode == DownloadMode::Parallel && !support.accepts_ranges {
                                 bail!(
@@ -609,15 +657,26 @@ impl SeafileClient {
                 }
             }
 
-            self.download_file_sequential(download_link, destination, existing_bytes, progress_mode)
-                .await
+            self.download_file_sequential(
+                download_link,
+                destination,
+                existing_bytes,
+                progress_mode,
+                auth,
+            )
+            .await
         })
     }
 
-    async fn probe_download_support(&self, download_link: &str) -> Result<Option<DownloadSupport>> {
+    async fn probe_download_support(
+        &self,
+        download_link: &str,
+        auth: DownloadAuth,
+    ) -> Result<Option<DownloadSupport>> {
         let response = self
             .http
             .get(download_link)
+            .with_download_auth(self, auth)?
             .header(header::RANGE, "bytes=0-0")
             .send()
             .await
@@ -659,11 +718,12 @@ impl SeafileClient {
         total_bytes: u64,
         requested_parts: usize,
         progress_mode: ProgressMode,
+        auth: DownloadAuth,
     ) -> Result<u64> {
         let ranges = split_download_ranges(total_bytes, requested_parts.max(1));
         if ranges.len() <= 1 {
             return self
-                .download_file_sequential(download_link, destination, 0, progress_mode)
+                .download_file_sequential(download_link, destination, 0, progress_mode, auth)
                 .await;
         }
 
@@ -681,12 +741,15 @@ impl SeafileClient {
             let url = download_link.to_string();
             let part_path = part_download_path(destination, index);
             let progress = progress.clone();
+            let auth_header = self.download_auth_header(auth);
             let start = *start;
             let end = *end;
 
             async move {
+                let auth_header = auth_header?;
                 let response = client
                     .get(&url)
+                    .with_auth_header(auth_header)
                     .header(header::RANGE, format!("bytes={start}-{end}"))
                     .send()
                     .await
@@ -759,10 +822,12 @@ impl SeafileClient {
         destination: &Path,
         existing_bytes: u64,
         progress_mode: ProgressMode,
+        auth: DownloadAuth,
     ) -> Result<u64> {
         let response = self
             .http
             .get(download_link)
+            .with_download_auth(self, auth)?
             .header(header::RANGE, format!("bytes={existing_bytes}-"))
             .send()
             .await
@@ -1001,6 +1066,32 @@ impl SeafileClient {
                 .context("failed to read text response")?;
             Ok(text.trim().trim_matches('"').to_string())
         })
+    }
+}
+
+trait AuthenticatedRequestBuilder {
+    fn with_download_auth(
+        self,
+        client: &SeafileClient,
+        auth: DownloadAuth,
+    ) -> Result<reqwest::RequestBuilder>;
+    fn with_auth_header(self, auth_header: Option<header::HeaderValue>) -> reqwest::RequestBuilder;
+}
+
+impl AuthenticatedRequestBuilder for reqwest::RequestBuilder {
+    fn with_download_auth(
+        self,
+        client: &SeafileClient,
+        auth: DownloadAuth,
+    ) -> Result<reqwest::RequestBuilder> {
+        Ok(self.with_auth_header(client.download_auth_header(auth)?))
+    }
+
+    fn with_auth_header(self, auth_header: Option<header::HeaderValue>) -> reqwest::RequestBuilder {
+        match auth_header {
+            Some(auth_header) => self.header(header::AUTHORIZATION, auth_header),
+            None => self,
+        }
     }
 }
 

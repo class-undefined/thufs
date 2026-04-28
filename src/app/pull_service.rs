@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::{
     config::ConfigManager,
     contract::RemoteRef,
-    seafile::SeafileClient,
+    seafile::{DownloadAuth, SeafileClient},
     transfer::{ConflictPolicy, DownloadMode, ProgressMode},
 };
 
@@ -109,6 +109,7 @@ impl PullService {
             download_mode,
             workers,
             progress_mode,
+            target.auth,
         )?;
         if overwritten && destination.exists() {
             std::fs::remove_file(&destination).with_context(|| {
@@ -153,6 +154,7 @@ impl PullService {
                 remote_path: format!("/{}", shared_file.file_name),
                 remote_name: shared_file.file_name,
                 download_link: shared_file.download_link,
+                auth: DownloadAuth::Optional,
             });
         }
 
@@ -170,6 +172,7 @@ impl PullService {
             remote_path: resolved.path,
             remote_name: remote_filename(&remote.path)?.to_string(),
             download_link,
+            auth: DownloadAuth::Required,
         })
     }
 }
@@ -181,6 +184,7 @@ struct ResolvedDownloadTarget {
     remote_path: String,
     remote_name: String,
     download_link: String,
+    auth: DownloadAuth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,5 +432,33 @@ mod tests {
     fn accepts_bare_hashcode_with_share_flag() {
         let shared = parse_share_ref("abc123XYZ_", true).expect("parse");
         assert_eq!(shared.expect("shared").token, "abc123XYZ_".to_string());
+    }
+
+    #[test]
+    fn repo_download_targets_require_authentication() {
+        let target = super::ResolvedDownloadTarget {
+            source: "repo:course-lib/slides/week1.pdf".to_string(),
+            repo: "course-lib".to_string(),
+            remote_path: "/slides/week1.pdf".to_string(),
+            remote_name: "week1.pdf".to_string(),
+            download_link: "https://cloud.tsinghua.edu.cn/seafhttp/files/example".to_string(),
+            auth: crate::seafile::DownloadAuth::Required,
+        };
+
+        assert_eq!(target.auth, crate::seafile::DownloadAuth::Required);
+    }
+
+    #[test]
+    fn share_download_targets_use_optional_authentication() {
+        let target = super::ResolvedDownloadTarget {
+            source: "share:abc123XYZ_".to_string(),
+            repo: "share".to_string(),
+            remote_path: "/week1.pdf".to_string(),
+            remote_name: "week1.pdf".to_string(),
+            download_link: "https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1".to_string(),
+            auth: crate::seafile::DownloadAuth::Optional,
+        };
+
+        assert_eq!(target.auth, crate::seafile::DownloadAuth::Optional);
     }
 }

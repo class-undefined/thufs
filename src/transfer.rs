@@ -64,6 +64,7 @@ struct ProgressEvent<'a> {
     transferred_bytes: u64,
     total_bytes: Option<u64>,
     percent: Option<f64>,
+    message: Option<&'a str>,
 }
 
 impl DownloadMode {
@@ -283,6 +284,18 @@ impl ProgressReporter {
         }
     }
 
+    pub fn warning(&self, message: impl Into<String>) -> Result<()> {
+        let message = message.into();
+        match self.inner.as_ref() {
+            ProgressReporterInner::None => Ok(()),
+            ProgressReporterInner::Bar(_) => {
+                eprintln!("warning: {message}");
+                Ok(())
+            }
+            ProgressReporterInner::Jsonl(_) => self.emit_jsonl_warning(&message),
+        }
+    }
+
     fn emit_jsonl(&self, event: &'static str, update: ProgressUpdate) -> Result<()> {
         let ProgressReporterInner::Jsonl(state) = self.inner.as_ref() else {
             return Ok(());
@@ -318,6 +331,39 @@ impl ProgressReporter {
             transferred_bytes,
             total_bytes,
             percent,
+            message: None,
+        };
+        serde_json::to_writer(&mut state.writer, &event)?;
+        writeln!(&mut state.writer)?;
+        state.writer.flush()?;
+        Ok(())
+    }
+
+    fn emit_jsonl_warning(&self, message: &str) -> Result<()> {
+        let ProgressReporterInner::Jsonl(state) = self.inner.as_ref() else {
+            return Ok(());
+        };
+
+        let mut state = state.lock().expect("progress reporter mutex poisoned");
+        let operation = state.operation;
+        let path = state.path.clone();
+        let transferred_bytes = state.last_transferred;
+        let total_bytes = state.total_bytes;
+        let percent = state.total_bytes.and_then(|total| {
+            if total == 0 {
+                None
+            } else {
+                Some((state.last_transferred as f64 / total as f64 * 100.0).min(100.0))
+            }
+        });
+        let event = ProgressEvent {
+            event: "warning",
+            operation,
+            path: &path,
+            transferred_bytes,
+            total_bytes,
+            percent,
+            message: Some(message),
         };
         serde_json::to_writer(&mut state.writer, &event)?;
         writeln!(&mut state.writer)?;
@@ -387,5 +433,22 @@ mod tests {
         assert!(lines[2].contains("\"transferred_bytes\":10"));
         assert!(lines[2].contains("\"percent\":50.0"));
         assert!(lines[3].contains("\"event\":\"progress-finished\""));
+    }
+
+    #[test]
+    fn jsonl_reporter_emits_warning_events() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let reporter = ProgressReporter::jsonl(
+            SharedWriter(output.clone()),
+            "download",
+            "file.bin",
+            Some(20),
+        );
+
+        reporter.warning("falling back").expect("warning");
+
+        let rendered = String::from_utf8(output.lock().expect("lock").clone()).expect("utf8");
+        assert!(rendered.contains("\"event\":\"warning\""));
+        assert!(rendered.contains("\"message\":\"falling back\""));
     }
 }
