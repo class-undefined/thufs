@@ -824,11 +824,15 @@ impl SeafileClient {
         progress_mode: ProgressMode,
         auth: DownloadAuth,
     ) -> Result<u64> {
-        let response = self
+        let mut request = self
             .http
             .get(download_link)
-            .with_download_auth(self, auth)?
-            .header(header::RANGE, format!("bytes={existing_bytes}-"))
+            .with_download_auth(self, auth)?;
+        if existing_bytes > 0 {
+            request = request.header(header::RANGE, format!("bytes={existing_bytes}-"));
+        }
+
+        let response = request
             .send()
             .await
             .context("failed to download file body")?
@@ -1265,15 +1269,23 @@ fn parse_directory_entries(dir_path: &str, payload: Value) -> Result<Vec<Directo
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+    };
+
     use tempfile::tempdir;
 
     use super::{
-        Repository, SeafileClient, parse_filename_from_content_disposition,
+        DownloadAuth, Repository, SeafileClient, parse_filename_from_content_disposition,
         parse_total_bytes_from_content_range, split_download_ranges,
     };
     use crate::{
         config::{Config, ConfigManager, OutputMode},
         contract::RemoteRef,
+        transfer::{DownloadMode, ProgressMode},
     };
 
     fn configured_client() -> (tempfile::TempDir, SeafileClient) {
@@ -1287,6 +1299,43 @@ mod tests {
             })
             .expect("write config");
         (temp, SeafileClient::new(manager))
+    }
+
+    fn single_request_server(response_body: &'static [u8]) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("local address");
+        let (sender, receiver) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let read = stream.read(&mut buffer).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            sender
+                .send(String::from_utf8_lossy(&request).into_owned())
+                .expect("send request");
+
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                response_body.len()
+            )
+            .expect("write response headers");
+            stream
+                .write_all(response_body)
+                .expect("write response body");
+        });
+
+        (format!("http://{address}/file.bin"), receiver)
     }
 
     #[test]
@@ -1371,5 +1420,34 @@ mod tests {
             split_download_ranges(10, 4),
             vec![(0, 2), (3, 5), (6, 8), (9, 9)]
         );
+    }
+
+    #[test]
+    fn default_download_mode_is_sequential() {
+        assert_eq!(DownloadMode::default(), DownloadMode::Sequential);
+    }
+
+    #[test]
+    fn sequential_download_does_not_send_range_for_new_file() {
+        let (_config, client) = configured_client();
+        let temp = tempdir().expect("tempdir");
+        let destination = temp.path().join("file.bin");
+        let (url, request) = single_request_server(b"content");
+
+        let bytes = client
+            .download_file(
+                &url,
+                &destination,
+                DownloadMode::default(),
+                4,
+                ProgressMode::None,
+                DownloadAuth::Required,
+            )
+            .expect("download file");
+
+        let request = request.recv().expect("request");
+        assert_eq!(bytes, 7);
+        assert_eq!(std::fs::read(&destination).expect("read file"), b"content");
+        assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
     }
 }

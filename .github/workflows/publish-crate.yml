@@ -183,17 +183,17 @@ jobs:
             echo
             echo "Highlights:"
             echo
-            echo "- private repository downloads now authenticate the actual file and range requests, not only the download-link lookup"
-            echo "- share-link downloads use the configured login identity when a token is available, and fall back to anonymous access when it is not"
-            echo "- automatic downloads now fall back from failed parallel Range requests to sequential download instead of aborting the command"
-            echo "- automatic fallback is reported as a warning; \`--progress jsonl\` emits a machine-readable warning event and \`--progress none\` stays quiet"
-            echo "- explicit \`--mode parallel\` remains strict and still fails when a range request cannot be completed"
+            echo "- download now defaults to sequential mode, so ordinary downloads no longer start with parallel Range requests"
+            echo "- new-file sequential downloads send a plain GET instead of \`Range: bytes=0-\`, avoiding servers that reject Range even after fallback"
+            echo "- \`--mode auto\` remains available when you explicitly want parallel probing with warning-based fallback"
+            echo "- \`--mode parallel\` remains strict and still fails when a range request cannot be completed"
+            echo "- README and \`download --help\` now document sequential as the default mode"
             echo
             echo "Example:"
             echo
             echo '```bash'
-            echo "thufs download repo:course/a.zip ./a.zip --progress jsonl"
-            echo "thufs download https://cloud.tsinghua.edu.cn/f/abc123XYZ_/ ./a.zip"
+            echo "thufs download repo:course/a.zip ./a.zip"
+            echo "thufs download --mode auto repo:course/a.zip ./a.zip --progress jsonl"
             echo '```'
             echo
             echo "Install from crates.io:"

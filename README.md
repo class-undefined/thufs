@@ -344,7 +344,8 @@ echo "saved to: $FINAL_PATH"
 - `--progress jsonl` 会向 stderr 持续输出 JSON Lines 进度事件，适合 GUI、任务队列和脚本精确追踪百分比
 - `--progress none` 可关闭传输进度输出
 - `download` 会使用 `.thufs-part` 临时文件，并在服务器支持时尝试断点续传
-- `download` 默认优先尝试并发分片下载；若自动模式下的 Range 分片请求失败，会清理临时文件并回退到单线程下载
+- `download` 默认使用单线程下载，避免在服务端 Range 支持不稳定时触发不必要的分片请求
+- 显式使用 `--mode auto` 时会优先尝试并发分片下载；若自动模式下的 Range 分片请求失败，会清理临时文件并回退到单线程下载
 - 自动回退会按进度模式报告为 warning：TTY 模式显示警告，`--progress jsonl` 输出 `warning` 事件，`--progress none` 保持静默；显式 `--mode parallel` 仍会严格失败
 - `upload` 会基于 Seafile 的 uploaded-bytes 机制进行尽力续传
 
@@ -366,9 +367,9 @@ thufs download repo:course-lib/slides/week1.pdf ./week1.pdf --progress jsonl
 
 下载模式可通过以下参数显式控制：
 
-- `--mode auto` 默认行为，优先并发，不满足条件时自动退回单线程
+- `--mode sequential` 默认行为，始终使用单线程下载
+- `--mode auto` 优先并发，不满足条件时自动退回单线程
 - `--mode parallel` 强制要求并发下载；若服务端不支持则报错
-- `--mode sequential` 始终使用单线程下载
 - `--workers N` 指定并发下载的 worker 数，仅对并发下载生效
 
 这类续传能力属于“best effort”，行为仍受服务端支持程度影响。

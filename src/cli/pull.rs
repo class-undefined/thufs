@@ -23,7 +23,7 @@ pub fn build_command() -> Command {
             Arg::new("mode")
                 .long("mode")
                 .value_name("MODE")
-                .help("Download mode: auto, parallel, or sequential")
+                .help("Download mode: sequential (default), auto, or parallel")
                 .value_parser(value_parser!(String)),
         )
         .arg(
@@ -90,7 +90,7 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
         .get_one::<String>("mode")
         .map(|value| crate::transfer::DownloadMode::parse_keyword(value))
         .transpose()?
-        .unwrap_or(crate::transfer::DownloadMode::Auto);
+        .unwrap_or_default();
     let workers = matches.get_one::<usize>("workers").copied().unwrap_or(4);
     let from_share = matches.get_flag("share");
 

@@ -23,6 +23,12 @@ pub enum DownloadMode {
     Sequential,
 }
 
+impl Default for DownloadMode {
+    fn default() -> Self {
+        Self::Sequential
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressMode {
     Auto,
