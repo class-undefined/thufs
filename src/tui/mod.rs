@@ -26,7 +26,8 @@ use crossterm::{
     cursor::{Hide, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     style::ResetColor,
@@ -38,7 +39,7 @@ use crate::config::ConfigManager;
 
 use self::{
     backend::Backend,
-    model::{Focus, Model, Workspace},
+    model::{Focus, Model, Overlay, Workspace},
     ui::HitMap,
 };
 
@@ -107,9 +108,7 @@ pub fn run(options: Options) -> Result<()> {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => model.handle_key(key),
                 Event::Paste(text) => model.paste(&text),
-                Event::Mouse(mouse) if model.overlay.is_none() => {
-                    handle_mouse(&mut model, mouse, &hits, &mut last_click)
-                }
+                Event::Mouse(mouse) => handle_mouse(&mut model, mouse, &hits, &mut last_click),
                 _ => {}
             }
         }
@@ -171,6 +170,10 @@ fn handle_mouse(
     hits: &HitMap,
     last_click: &mut Option<(Instant, u16, u16)>,
 ) {
+    if model.overlay.is_some() {
+        handle_dialog_mouse(model, mouse, hits, last_click);
+        return;
+    }
     let point = Position::new(mouse.column, mouse.row);
     match mouse.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -229,6 +232,110 @@ fn handle_mouse(
                 if double {
                     model.enter();
                 }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_dialog_mouse(
+    model: &mut Model,
+    mouse: MouseEvent,
+    hits: &HitMap,
+    last_click: &mut Option<(Instant, u16, u16)>,
+) {
+    let point = Position::new(mouse.column, mouse.row);
+    if matches!(model.overlay, Some(Overlay::Form(_))) {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        for &(rect, field) in &hits.dialog.browse {
+            if rect.contains(point) {
+                *last_click = None;
+                model.browse_path(field);
+                return;
+            }
+        }
+        for &(rect, field) in &hits.dialog.fields {
+            if rect.contains(point) {
+                if let Some(Overlay::Form(form)) = &mut model.overlay {
+                    form.active = field;
+                }
+                return;
+            }
+        }
+        return;
+    }
+    if !matches!(model.overlay, Some(Overlay::Picker(_))) {
+        return;
+    }
+    let Some(dialog) = &hits.dialog.picker else {
+        return;
+    };
+    let key = |code, modifiers| KeyEvent::new(code, modifiers);
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if dialog.list.contains(point) => {
+            *last_click = None;
+            for _ in 0..3 {
+                model.handle_key(key(
+                    if mouse.kind == MouseEventKind::ScrollUp {
+                        KeyCode::Up
+                    } else {
+                        KeyCode::Down
+                    },
+                    KeyModifiers::NONE,
+                ));
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if dialog.browse.contains(point) {
+                *last_click = None;
+                model.browse_path(0);
+                return;
+            }
+            if dialog.parent.contains(point) {
+                *last_click = None;
+                model.handle_key(key(KeyCode::Up, KeyModifiers::ALT));
+                return;
+            }
+            if dialog.cancel.contains(point) {
+                *last_click = None;
+                model.handle_key(key(KeyCode::Esc, KeyModifiers::NONE));
+                return;
+            }
+            if dialog.select.contains(point) {
+                *last_click = None;
+                let directory = matches!(&model.overlay, Some(Overlay::Picker(picker)) if picker.directories_only());
+                model.handle_key(if directory {
+                    key(KeyCode::Char('d'), KeyModifiers::CONTROL)
+                } else {
+                    key(KeyCode::Enter, KeyModifiers::NONE)
+                });
+                return;
+            }
+            if dialog.list.contains(point) {
+                let row = (mouse.row - dialog.list.y) as usize;
+                if row >= dialog.rows {
+                    return;
+                }
+                let double = last_click.is_some_and(|(time, x, y)| {
+                    time.elapsed() < Duration::from_millis(400)
+                        && x == mouse.column
+                        && y == mouse.row
+                });
+                *last_click = if double {
+                    None
+                } else {
+                    Some((Instant::now(), mouse.column, mouse.row))
+                };
+                if let Some(Overlay::Picker(picker)) = &mut model.overlay {
+                    picker.selected = dialog.start + row;
+                }
+                if double {
+                    model.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+                }
+            } else if dialog.input.contains(point) {
+                *last_click = None;
             }
         }
         _ => {}

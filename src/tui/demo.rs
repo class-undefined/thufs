@@ -79,9 +79,12 @@ pub fn respond(request: Request) -> Message {
             cwd,
             hidden,
             directories_only,
+            browse,
         } => Message::PathMatches {
             id,
-            result: if directories_only {
+            result: if browse {
+                super::paths::browse(&input, &cwd, hidden, directories_only)
+            } else if directories_only {
                 super::paths::directories(&input, &cwd, hidden)
             } else {
                 super::paths::matches(&input, &cwd, hidden)

@@ -294,6 +294,9 @@ impl Form {
             FormKind::Upload | FormKind::UploadMany(_) | FormKind::Download(_)
         )
     }
+    pub fn can_browse(&self, field: usize) -> bool {
+        field == 0 && matches!(self.kind, FormKind::Upload | FormKind::Download(_))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +315,8 @@ pub enum PickerPurpose {
 
 #[derive(Debug, Clone)]
 pub struct Picker {
+    pub return_to: Option<Box<Form>>,
+    pub browse_target: Option<PathBuf>,
     pub purpose: PickerPurpose,
     pub cwd: PathBuf,
     pub entries: Vec<LocalEntry>,
@@ -328,6 +333,29 @@ pub struct Picker {
 }
 
 impl Picker {
+    fn new(purpose: PickerPurpose, cwd: PathBuf) -> Self {
+        Self {
+            return_to: None,
+            browse_target: None,
+            purpose,
+            cwd: cwd.clone(),
+            entries: Vec::new(),
+            selected: 0,
+            hidden: false,
+            loading: true,
+            generation: 0,
+            error: None,
+            input: Editor::default(),
+            chosen: HashSet::new(),
+            match_root: cwd.clone(),
+            pattern: false,
+            truncated: false,
+        }
+    }
+
+    pub fn allows_multiple(&self) -> bool {
+        !self.directories_only() && self.return_to.is_none()
+    }
     pub fn directories_only(&self) -> bool {
         matches!(self.purpose, PickerPurpose::Download { .. })
     }
@@ -1251,37 +1279,33 @@ impl Model {
     }
 
     fn refresh_paths(&mut self, picker: &mut Picker) {
+        self.load_paths(picker, false);
+    }
+
+    fn load_paths(&mut self, picker: &mut Picker, browse: bool) {
         picker.selected = 0;
         picker.chosen.clear();
         picker.entries.clear();
         picker.loading = true;
         picker.error = None;
         picker.generation = self.id();
+        picker.browse_target = if browse {
+            Some(super::paths::resolve(&picker.input.text, &picker.cwd))
+        } else {
+            None
+        };
         self.requests.push(Request::MatchPaths {
             id: picker.generation,
             input: picker.input.text.clone(),
             cwd: picker.cwd.clone(),
             hidden: picker.hidden,
             directories_only: picker.directories_only(),
+            browse,
         });
     }
 
     fn open_picker(&mut self, purpose: PickerPurpose) {
-        let mut picker = Picker {
-            purpose,
-            cwd: self.local.clone(),
-            entries: Vec::new(),
-            selected: 0,
-            hidden: false,
-            loading: true,
-            generation: 0,
-            error: None,
-            input: Editor::default(),
-            chosen: HashSet::new(),
-            match_root: self.local.clone(),
-            pattern: false,
-            truncated: false,
-        };
+        let mut picker = Picker::new(purpose, self.local.clone());
         self.refresh_paths(&mut picker);
         self.overlay = Some(Overlay::Picker(picker));
     }
@@ -1290,6 +1314,13 @@ impl Model {
         let PickerPurpose::Download { remotes } = &picker.purpose else {
             return;
         };
+        if let Some(original) = &picker.return_to {
+            let mut form = (**original).clone();
+            form.fields[0].editor = Editor::new(directory.display().to_string());
+            form.error = None;
+            self.overlay = Some(Overlay::Form(form));
+            return;
+        }
         self.overlay = Some(Overlay::Form(Form::new(
             FormKind::Download(remotes.clone()),
             "Download files",
@@ -1300,12 +1331,31 @@ impl Model {
         )));
     }
 
-    fn review_upload(&mut self, files: Vec<PathBuf>) {
+    fn review_upload(&mut self, picker: &Picker, files: Vec<PathBuf>) {
         let Some(location) = &self.location else {
             return;
         };
         if let Some(parent) = files.first().and_then(|file| file.parent()) {
             self.local = parent.to_path_buf();
+        }
+        if let (Some(original), Some(file)) = (&picker.return_to, files.first()) {
+            let mut form = (**original).clone();
+            let old_name = std::path::Path::new(&form.fields[0].editor.text)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let suggested = format!("{}/{}", location.remote().trim_end_matches('/'), old_name);
+            if form.fields[1].editor.text == suggested {
+                form.fields[1].editor = Editor::new(format!(
+                    "{}/{}",
+                    location.remote().trim_end_matches('/'),
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            form.fields[0].editor = Editor::new(file.display().to_string());
+            form.error = None;
+            self.overlay = Some(Overlay::Form(form));
+            return;
         }
         let form = if files.len() == 1 {
             let file = &files[0];
@@ -1337,11 +1387,45 @@ impl Model {
         self.overlay = Some(Overlay::Form(form));
     }
 
+    pub fn browse_path(&mut self, field: usize) {
+        if let Some(Overlay::Form(form)) = &mut self.overlay {
+            if !form.can_browse(field) {
+                return;
+            }
+            form.active = field;
+        } else if !matches!(self.overlay, Some(Overlay::Picker(_))) {
+            return;
+        }
+        self.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+    }
+
+    fn browse_form(&mut self, form: Form) {
+        let purpose = match &form.kind {
+            FormKind::Upload => PickerPurpose::Upload,
+            FormKind::Download(remotes) => PickerPurpose::Download {
+                remotes: remotes.clone(),
+            },
+            _ => return,
+        };
+        // Form paths follow the process working directory, just like the transfer CLI.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| self.local.clone());
+        let mut picker = Picker::new(purpose, cwd);
+        picker.input = Editor::new(form.fields[0].editor.text.clone());
+        picker.return_to = Some(Box::new(form));
+        self.load_paths(&mut picker, true);
+        self.overlay = Some(Overlay::Picker(picker));
+    }
+
     fn overlay_key(&mut self, key: KeyEvent) {
         let Some(mut overlay) = self.overlay.take() else {
             return;
         };
         if key.code == KeyCode::Esc && !matches!(overlay, Overlay::Busy { .. }) {
+            if let Overlay::Picker(picker) = overlay {
+                if let Some(form) = picker.return_to {
+                    self.overlay = Some(Overlay::Form(*form));
+                }
+            }
             return;
         }
         match &mut overlay {
@@ -1395,6 +1479,15 @@ impl Model {
                 }
             }
             Overlay::Form(form) => match key.code {
+                KeyCode::F(4) | KeyCode::Char('b')
+                    if key.code == KeyCode::F(4)
+                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if form.can_browse(form.active) {
+                        self.browse_form(form.clone());
+                        return;
+                    }
+                }
                 KeyCode::Tab | KeyCode::Down => form.active = (form.active + 1) % form.fields.len(),
                 KeyCode::BackTab | KeyCode::Up => {
                     form.active = (form.active + form.fields.len() - 1) % form.fields.len()
@@ -1422,6 +1515,9 @@ impl Model {
                 let alt = key.modifiers.contains(KeyModifiers::ALT);
                 let mut reload = false;
                 match key.code {
+                    KeyCode::F(4) | KeyCode::Char('b') if key.code == KeyCode::F(4) || control => {
+                        self.load_paths(picker, true);
+                    }
                     KeyCode::Up if alt => {
                         if let Some(parent) = picker.cwd.parent() {
                             picker.cwd = parent.to_path_buf();
@@ -1457,7 +1553,7 @@ impl Model {
                             return;
                         }
                     }
-                    KeyCode::Char('a') if control && !picker.directories_only() => {
+                    KeyCode::Char('a') if control && picker.allows_multiple() => {
                         let files: HashSet<_> = picker
                             .entries
                             .iter()
@@ -1470,7 +1566,7 @@ impl Model {
                             picker.chosen = files;
                         }
                     }
-                    KeyCode::Char(' ') if control && !picker.directories_only() => {
+                    KeyCode::Char(' ') if control && picker.allows_multiple() => {
                         if let Some(entry) =
                             picker.entries.get(picker.selected).filter(|e| !e.is_dir)
                         {
@@ -1500,7 +1596,7 @@ impl Model {
                             .map(|e| e.path.clone())
                             .collect();
                         if !files.is_empty() {
-                            self.review_upload(files);
+                            self.review_upload(picker, files);
                             return;
                         }
                         if let Some(entry) = picker.entries.get(picker.selected) {
@@ -1512,7 +1608,7 @@ impl Model {
                                 picker.input = Editor::default();
                                 reload = true;
                             } else if !picker.directories_only() {
-                                self.review_upload(vec![entry.path.clone()]);
+                                self.review_upload(picker, vec![entry.path.clone()]);
                                 return;
                             }
                         }
@@ -1994,6 +2090,11 @@ impl Model {
                         picker.loading = false;
                         match result {
                             Ok(matches) => {
+                                let browse_target = picker.browse_target.take();
+                                if browse_target.is_some() {
+                                    picker.cwd = matches.root.clone();
+                                    picker.input = Editor::default();
+                                }
                                 picker.entries = matches.entries;
                                 if picker.directories_only() {
                                     if let Some(directory) = matches.directory {
@@ -2011,6 +2112,13 @@ impl Model {
                                 picker.match_root = matches.root;
                                 picker.pattern = matches.pattern;
                                 picker.truncated = matches.truncated;
+                                if let Some(target) = browse_target {
+                                    picker.selected = picker
+                                        .entries
+                                        .iter()
+                                        .position(|entry| entry.path == target)
+                                        .unwrap_or(0);
+                                }
                             }
                             Err(error) => picker.error = Some(error),
                         }

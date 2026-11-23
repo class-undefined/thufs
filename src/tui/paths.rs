@@ -58,6 +58,39 @@ pub fn directories(input: &str, cwd: &Path, hidden: bool) -> Result<PathMatches>
     }
 }
 
+/// Browse the nearest existing directory instead of filtering by the file name.
+pub fn browse(
+    input: &str,
+    cwd: &Path,
+    hidden: bool,
+    directories_only: bool,
+) -> Result<PathMatches> {
+    let target = resolve(input, cwd);
+    let mut directory = target.as_path();
+    while !directory.is_dir() {
+        directory = directory
+            .parent()
+            .context("Cannot find a directory to browse.")?;
+    }
+    if directories_only {
+        directories(
+            directory.to_str().context("The path is not valid UTF-8.")?,
+            cwd,
+            hidden,
+        )
+    } else {
+        let input = format!(
+            "{}{}",
+            directory
+                .to_str()
+                .context("The path is not valid UTF-8.")?
+                .trim_end_matches(std::path::MAIN_SEPARATOR),
+            std::path::MAIN_SEPARATOR
+        );
+        matches(&input, cwd, hidden)
+    }
+}
+
 fn matches_filtered(
     input: &str,
     cwd: &Path,
@@ -448,5 +481,20 @@ mod tests {
                 .any(|entry| entry.name == ".hidden-folder")
         );
         assert!(directories("results.csv", temp.path(), false).is_err());
+    }
+
+    #[test]
+    fn browse_lists_the_whole_parent_of_a_file_and_recovers_from_an_unfinished_path() {
+        let temp = fixture();
+        let result = browse("report one.txt", temp.path(), false, false).unwrap();
+        assert!(
+            result
+                .entries
+                .iter()
+                .any(|entry| entry.name == "report two.txt")
+        );
+        let result = browse("missing/subfolder", temp.path(), false, true).unwrap();
+        assert!(result.entries.iter().all(|entry| entry.is_dir));
+        assert_eq!(result.directory.as_deref(), Some(temp.path()));
     }
 }

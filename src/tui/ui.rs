@@ -98,6 +98,25 @@ pub struct HitMap {
     pub list_start: usize,
     pub library_start: usize,
     pub tabs: Vec<(Rect, Workspace)>,
+    pub dialog: DialogHits,
+}
+
+#[derive(Default)]
+pub struct DialogHits {
+    pub fields: Vec<(Rect, usize)>,
+    pub browse: Vec<(Rect, usize)>,
+    pub picker: Option<PickerHits>,
+}
+
+pub struct PickerHits {
+    pub input: Rect,
+    pub browse: Rect,
+    pub parent: Rect,
+    pub list: Rect,
+    pub start: usize,
+    pub rows: usize,
+    pub select: Rect,
+    pub cancel: Rect,
 }
 
 pub fn draw(frame: &mut Frame, model: &Model) -> HitMap {
@@ -143,7 +162,7 @@ pub fn draw(frame: &mut Frame, model: &Model) -> HitMap {
     }
     footer(frame, model, regions[2], theme, &mut hits);
     if let Some(overlay) = &model.overlay {
-        draw_overlay(frame, model, overlay, theme);
+        draw_overlay(frame, model, overlay, theme, &mut hits.dialog);
     }
     hits
 }
@@ -1184,7 +1203,13 @@ fn empty(frame: &mut Frame, area: Rect, symbol: &str, title: &str, description: 
     );
 }
 
-fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
+fn draw_overlay(
+    frame: &mut Frame,
+    model: &Model,
+    overlay: &Overlay,
+    t: Theme,
+    hits: &mut DialogHits,
+) {
     match overlay {
         Overlay::Accounts { selected } => {
             let area = popup(
@@ -1312,8 +1337,8 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
                 Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
             );
         }
-        Overlay::Form(form) => draw_form(frame, form, t),
-        Overlay::Picker(picker) => draw_picker(frame, model, picker, t),
+        Overlay::Form(form) => draw_form(frame, form, t, hits),
+        Overlay::Picker(picker) => draw_picker(frame, model, picker, t, hits),
         Overlay::Busy { form, .. } => {
             let area = popup(frame, 64, 8, " WORKING ", t, false);
             frame.render_widget(
@@ -1480,7 +1505,7 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
     }
 }
 
-fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
+fn draw_form(frame: &mut Frame, form: &Form, t: Theme, hits: &mut DialogHits) {
     let height = 9 + form.fields.len() as u16 * 3 + if form.is_transfer() { 2 } else { 0 };
     let area = popup(
         frame,
@@ -1533,7 +1558,20 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
             Block::default().style(Style::default().bg(if active { t.selected } else { t.bg })),
             input,
         );
+        let input = if form.can_browse(index) {
+            let width = button_width("Browse…", t);
+            let browse = Rect::new(input.right().saturating_sub(width), input.y, width, 1);
+            button(frame, "Browse…", browse, t, active);
+            hits.browse.push((browse, index));
+            Rect {
+                width: input.width.saturating_sub(width + 1),
+                ..input
+            }
+        } else {
+            input
+        };
         let field_area = Rect::new(input.x + 1, input.y, input.width.saturating_sub(2), 1);
+        hits.fields.push((field_area, index));
         if active {
             editor(frame, &field.editor, field_area, field.secret, t);
         } else {
@@ -1589,13 +1627,17 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
         );
     }
     frame.render_widget(
-        Paragraph::new(t.language.tr("tab next field   enter confirm   esc cancel"))
-            .style(t.muted()),
+        Paragraph::new(t.language.tr(if form.can_browse(form.active) {
+            "tab next field   Ctrl+B browse   enter confirm   esc cancel"
+        } else {
+            "tab next field   enter confirm   esc cancel"
+        }))
+        .style(t.muted()),
         Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
     );
 }
 
-fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
+fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme, hits: &mut DialogHits) {
     let directory_mode = picker.directories_only();
     let area = popup(
         frame,
@@ -1617,13 +1659,32 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
             safe(&picker.cwd.display().to_string())
         ))
         .style(t.muted()),
-        Rect { height: 1, ..inner },
+        Rect {
+            height: 1,
+            width: inner.width.saturating_sub(6),
+            ..inner
+        },
     );
-    let input_area = Rect::new(inner.x + 2, inner.y + 2, inner.width.saturating_sub(3), 1);
+    let parent = Rect::new(inner.right().saturating_sub(5), inner.y, 5, 1);
+    button(frame, "↑", parent, t, false);
+    let browse_width = button_width("Browse…", t);
+    let browse = Rect::new(
+        inner.right().saturating_sub(browse_width),
+        inner.y + 2,
+        browse_width,
+        1,
+    );
+    let input_area = Rect::new(
+        inner.x + 2,
+        inner.y + 2,
+        inner.width.saturating_sub(browse_width + 4),
+        1,
+    );
     frame.render_widget(
         Block::default().style(t.selected()),
         Rect::new(inner.x, input_area.y, inner.width, 1),
     );
+    button(frame, "Browse…", browse, t, true);
     frame.render_widget(
         Paragraph::new("› ").style(t.accent()),
         Rect::new(inner.x, input_area.y, 2, 1),
@@ -1676,7 +1737,7 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
         inner.x,
         inner.y + 6,
         inner.width,
-        inner.height.saturating_sub(9),
+        inner.height.saturating_sub(10),
     );
     if picker.loading {
         frame.render_widget(
@@ -1755,11 +1816,48 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
             );
         }
     }
+    let select_label = if directory_mode {
+        "Use directory"
+    } else {
+        "Select"
+    };
+    let cancel_width = button_width("Cancel", t);
+    let select_width = button_width(select_label, t);
+    let cancel = Rect::new(
+        inner.right().saturating_sub(cancel_width),
+        area.bottom().saturating_sub(4),
+        cancel_width,
+        1,
+    );
+    let select = Rect::new(
+        cancel.x.saturating_sub(select_width + 2),
+        cancel.y,
+        select_width,
+        1,
+    );
+    button(frame, select_label, select, t, true);
+    button(frame, "Cancel", cancel, t, false);
+    hits.picker = Some(PickerHits {
+        input: input_area,
+        browse,
+        parent,
+        list: body,
+        start: scroll_start(picker.selected, body.height as usize, picker.entries.len()),
+        rows: if picker.loading || picker.error.is_some() {
+            0
+        } else {
+            picker.entries.len().min(body.height as usize)
+        },
+        select,
+        cancel,
+    });
     frame.render_widget(
         Paragraph::new(t.language.tr(if directory_mode {
             "↑↓ select  tab complete  enter open/use  esc cancel"
-        } else {
+        } else if picker.allows_multiple() {
             "↑↓ select  tab complete  enter choose  ctrl+a all matches  esc cancel"
+        } else {
+            "↑↓ select  tab complete  enter open/select  esc cancel"
         }))
         .style(t.muted()),
         Rect::new(inner.x, area.bottom().saturating_sub(3), inner.width, 1),
@@ -1767,8 +1865,10 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
     frame.render_widget(
         Paragraph::new(t.language.tr(if directory_mode {
             "Ctrl+D use directory · Alt+↑ parent · Alt+. hidden · Ctrl+L clear"
-        } else {
+        } else if picker.allows_multiple() {
             "Ctrl+L clear path · Alt+↑ parent · Alt+. hidden · Ctrl+Space select"
+        } else {
+            "Ctrl+B browse · Alt+↑ parent · Alt+. hidden · Ctrl+L clear"
         }))
         .style(t.muted()),
         Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
@@ -1776,6 +1876,23 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
     // The path field remains the input target while arrows move through matches.
     let (_, cursor) = picker.input.viewport(input_area.width as usize, false);
     frame.set_cursor_position((input_area.x + cursor, input_area.y));
+}
+
+fn button_width(label: &str, t: Theme) -> u16 {
+    cell_width(&t.language.tr(label)) as u16 + 4
+}
+
+fn button(frame: &mut Frame, label: &str, area: Rect, t: Theme, primary: bool) {
+    frame.render_widget(
+        Paragraph::new(format!("[ {} ]", t.language.tr(label)))
+            .alignment(Alignment::Center)
+            .style(if primary {
+                t.selected().fg(t.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.accent).bg(t.panel)
+            }),
+        area,
+    );
 }
 
 fn popup(frame: &mut Frame, width: u16, height: u16, title: &str, t: Theme, bottom: bool) -> Rect {

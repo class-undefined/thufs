@@ -1057,3 +1057,262 @@ fn download_picker_supports_chinese_narrow_layouts_and_demo_preview_without_star
     assert!(matches!(&model.overlay, Some(Overlay::Form(form)) if form.error.is_some()));
     assert!(model.transfers.is_empty());
 }
+
+fn click(
+    model: &mut Model,
+    hits: &ui::HitMap,
+    area: ratatui::layout::Rect,
+    last: &mut Option<(Instant, u16, u16)>,
+) {
+    super::handle_mouse(
+        model,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + area.width / 2,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        hits,
+        last,
+    );
+}
+
+fn upload_form() -> (TempDir, Model) {
+    let (temp, mut model) = fixture();
+    std::fs::write(temp.path().join("alpha.txt"), "a").unwrap();
+    std::fs::write(temp.path().join("beta.txt"), "b").unwrap();
+    model.action(Action::Upload);
+    model.paste("alpha.txt");
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Enter);
+    (temp, model)
+}
+
+#[test]
+fn clicking_upload_browse_and_double_clicking_a_file_only_updates_the_local_path() {
+    let (temp, mut model) = upload_form();
+    let Some(Overlay::Form(form)) = &mut model.overlay else {
+        panic!("upload form")
+    };
+    form.fields[1].editor = Editor::new("repo:Research/custom/name.bin");
+    form.conflict = 1;
+    let (_, hits) = render(&model, 100, 32);
+    let mut last = None;
+    assert_eq!(hits.dialog.browse.len(), 1);
+    click(&mut model, &hits, hits.dialog.browse[0].0, &mut last);
+    assert_eq!(model.requests.len(), 1);
+    flush_demo(&mut model);
+    let Some(Overlay::Picker(picker)) = &model.overlay else {
+        panic!("file dialog")
+    };
+    assert!(!picker.allows_multiple());
+    let index = picker
+        .entries
+        .iter()
+        .position(|entry| entry.name == "beta.txt")
+        .unwrap();
+    let (_, hits) = render(&model, 100, 32);
+    let dialog = hits.dialog.picker.as_ref().unwrap();
+    let row = ratatui::layout::Rect::new(
+        dialog.list.x,
+        dialog.list.y + (index - dialog.start) as u16,
+        dialog.list.width,
+        1,
+    );
+    click(&mut model, &hits, row, &mut last);
+    assert!(matches!(model.overlay, Some(Overlay::Picker(_))));
+    click(&mut model, &hits, row, &mut last);
+    let Some(Overlay::Form(form)) = &model.overlay else {
+        panic!("returned upload form")
+    };
+    assert_eq!(
+        std::path::Path::new(&form.fields[0].editor.text),
+        temp.path().join("beta.txt")
+    );
+    assert_eq!(form.fields[1].editor.text, "repo:Research/custom/name.bin");
+    assert_eq!(form.policy(), "overwrite");
+    assert!(model.transfers.is_empty());
+}
+
+#[test]
+fn directory_dialog_cancel_and_select_preserve_download_options_and_remote_files() {
+    let (temp, mut model) = fixture();
+    let picked = temp.path().join("选中 目录");
+    std::fs::create_dir(&picked).unwrap();
+    select_file(&mut model, "paper-draft.pdf");
+    model.action(Action::Download);
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Enter);
+    let original = temp
+        .path()
+        .join("missing/typed-directory")
+        .display()
+        .to_string();
+    let Some(Overlay::Form(form)) = &mut model.overlay else {
+        panic!("download form")
+    };
+    form.fields[0].editor = Editor::new(&original);
+    form.conflict = 2;
+    ctrl(&mut model, 'b');
+    flush_demo(&mut model);
+    let (_, hits) = render(&model, 100, 32);
+    let mut last = None;
+    click(
+        &mut model,
+        &hits,
+        hits.dialog.picker.as_ref().unwrap().cancel,
+        &mut last,
+    );
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if form.fields[0].editor.text == original && form.policy() == "fail")
+    );
+    key(&mut model, KeyCode::F(4));
+    flush_demo(&mut model);
+    let Some(Overlay::Picker(picker)) = &model.overlay else {
+        panic!("directory dialog")
+    };
+    let index = picker
+        .entries
+        .iter()
+        .position(|entry| entry.path == picked)
+        .unwrap();
+    let (_, hits) = render(&model, 100, 32);
+    let dialog = hits.dialog.picker.as_ref().unwrap();
+    let row = ratatui::layout::Rect::new(
+        dialog.list.x,
+        dialog.list.y + (index - dialog.start) as u16,
+        dialog.list.width,
+        1,
+    );
+    click(&mut model, &hits, row, &mut last);
+    // Choosing a highlighted folder does not require entering that folder first.
+    last = None;
+    click(
+        &mut model,
+        &hits,
+        hits.dialog.picker.as_ref().unwrap().select,
+        &mut last,
+    );
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if std::path::Path::new(&form.fields[0].editor.text) == picked && form.policy() == "fail" && matches!(&form.kind, FormKind::Download(remotes) if remotes == &["repo:Research/paper-draft.pdf"]))
+    );
+    assert!(model.transfers.is_empty());
+}
+
+#[test]
+fn picker_browse_button_expands_matches_and_parent_and_wheel_are_mouse_operable() {
+    let (temp, mut model) = fixture();
+    let child = temp.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    for index in 0..12 {
+        std::fs::write(temp.path().join(format!("file-{index:02}.txt")), "data").unwrap();
+    }
+    model.local = child;
+    model.action(Action::Upload);
+    flush_demo(&mut model);
+    let (_, hits) = render(&model, 80, 22);
+    let mut last = None;
+    click(
+        &mut model,
+        &hits,
+        hits.dialog.picker.as_ref().unwrap().parent,
+        &mut last,
+    );
+    flush_demo(&mut model);
+    model.paste("file-00.txt");
+    flush_demo(&mut model);
+    let (_, hits) = render(&model, 80, 22);
+    click(
+        &mut model,
+        &hits,
+        hits.dialog.picker.as_ref().unwrap().browse,
+        &mut last,
+    );
+    flush_demo(&mut model);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Picker(p)) if p.input.text.is_empty() && p.entries.len() == 13)
+    );
+    let (_, hits) = render(&model, 80, 22);
+    let list = hits.dialog.picker.as_ref().unwrap().list;
+    super::handle_mouse(
+        &mut model,
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: list.x,
+            row: list.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        &hits,
+        &mut last,
+    );
+    assert!(matches!(&model.overlay, Some(Overlay::Picker(p)) if p.selected == 4));
+    click(&mut model, &hits, hits.tabs[3].0, &mut last);
+    assert_eq!(model.workspace, Workspace::Files);
+}
+
+#[test]
+fn browse_controls_fit_narrow_dialogs_in_both_languages_and_escape_restores_the_form() {
+    let (_temp, mut model) = upload_form();
+    for language in [
+        super::i18n::Language::English,
+        super::i18n::Language::Chinese,
+    ] {
+        model.settings.language = language;
+        let (_, hits) = render(&model, 60, 18);
+        let browse = hits.dialog.browse[0].0;
+        assert!(browse.right() <= 60);
+        assert!(hits.dialog.fields[0].0.right() < browse.x);
+        model.browse_path(0);
+        flush_demo(&mut model);
+        let (_, hits) = render(&model, 60, 18);
+        let dialog = hits.dialog.picker.unwrap();
+        assert!(
+            dialog.browse.right() <= 60
+                && dialog.select.right() < dialog.cancel.x
+                && dialog.cancel.right() <= 60
+        );
+        key(&mut model, KeyCode::Esc);
+        assert!(matches!(model.overlay, Some(Overlay::Form(_))));
+    }
+}
+
+#[test]
+fn authentication_fields_do_not_expose_path_browsing_controls() {
+    let temp = tempdir().unwrap();
+    let mut model = Model::new(temp.path().to_path_buf(), None, false);
+    model.configure_settings(
+        super::settings::SettingsView {
+            language: super::i18n::Language::English,
+            active_account: None,
+            accounts: vec![],
+        },
+        false,
+    );
+    let (_, hits) = render(&model, 100, 32);
+    assert!(hits.dialog.browse.is_empty());
+    ctrl(&mut model, 'b');
+    key(&mut model, KeyCode::F(4));
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if matches!(form.kind, FormKind::Login))
+    );
+    assert!(model.requests.is_empty());
+}
+
+#[test]
+fn reselecting_an_upload_file_updates_the_untouched_suggested_remote_name() {
+    let (_temp, mut model) = upload_form();
+    model.browse_path(0);
+    flush_demo(&mut model);
+    let Some(Overlay::Picker(picker)) = &mut model.overlay else {
+        panic!("file dialog")
+    };
+    picker.selected = picker
+        .entries
+        .iter()
+        .position(|entry| entry.name == "beta.txt")
+        .unwrap();
+    key(&mut model, KeyCode::Enter);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if form.fields[1].editor.text == "repo:Research/beta.txt")
+    );
+}

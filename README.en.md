@@ -182,6 +182,7 @@ Navigate with arrow keys or `j/k/h/l`; use `Space` to select files, `u` to uploa
 Settings supports English/Chinese, token login, saved accounts, and account switching.
 The upload picker accepts paths and wildcard patterns, with `Tab` completion and `Ctrl+A` to select all matching files before upload confirmation.
 Downloads open a directory picker with folder browsing, path input, and completion before confirming the destination.
+Click **Browse…** beside a local path, or press `Ctrl+B` / `F4`, to open the TUI file dialog with mouse selection, double-click navigation, and Select/Cancel buttons.
 Press `?` for the full keyboard guide.
 
 Use `thufs tui --demo` for a read-only offline preview without credentials.

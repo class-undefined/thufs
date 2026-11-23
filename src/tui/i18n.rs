@@ -99,6 +99,23 @@ impl Language {
 }
 
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Browse…", "浏览…"),
+    ("Select", "选择"),
+    ("Cancel", "取消"),
+    ("Use directory", "选用目录"),
+    (
+        "tab next field   Ctrl+B browse   enter confirm   esc cancel",
+        "tab 下一项  Ctrl+B 浏览  enter 确认  esc 取消",
+    ),
+    (
+        "↑↓ select  tab complete  enter open/select  esc cancel",
+        "↑↓ 选择  tab 补全  enter 打开/选择  esc 取消",
+    ),
+    (
+        "Ctrl+B browse · Alt+↑ parent · Alt+. hidden · Ctrl+L clear",
+        "Ctrl+B 浏览 · Alt+↑ 上级 · Alt+. 隐藏项 · Ctrl+L 清空",
+    ),
+    ("Cannot find a directory to browse.", "找不到可浏览的目录。"),
     ("DOWNLOAD · CHOOSE A DIRECTORY", "下载 · 选择保存目录"),
     (
         "Type a directory path. Tab completes; Enter opens or selects.",
