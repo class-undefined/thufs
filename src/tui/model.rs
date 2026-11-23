@@ -305,7 +305,14 @@ pub struct LocalEntry {
 }
 
 #[derive(Debug, Clone)]
+pub enum PickerPurpose {
+    Upload,
+    Download { remotes: Vec<String> },
+}
+
+#[derive(Debug, Clone)]
 pub struct Picker {
+    pub purpose: PickerPurpose,
     pub cwd: PathBuf,
     pub entries: Vec<LocalEntry>,
     pub selected: usize,
@@ -318,6 +325,15 @@ pub struct Picker {
     pub match_root: PathBuf,
     pub pattern: bool,
     pub truncated: bool,
+}
+
+impl Picker {
+    pub fn directories_only(&self) -> bool {
+        matches!(self.purpose, PickerPurpose::Download { .. })
+    }
+    pub fn is_current_directory(&self, entry: &LocalEntry) -> bool {
+        self.directories_only() && entry.name == "."
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -903,12 +919,7 @@ impl Model {
             self.open_login();
             return;
         }
-        if self.demo
-            && matches!(
-                action,
-                Action::Download | Action::Share | Action::Mkdir | Action::NewLibrary
-            )
-        {
+        if self.demo && matches!(action, Action::Share | Action::Mkdir | Action::NewLibrary) {
             self.toast(
                 "This demo is read-only. Run thufs tui to work with your cloud drive.",
                 false,
@@ -997,27 +1008,7 @@ impl Model {
                 };
                 match action {
                     Action::Upload => {
-                        let id = self.id();
-                        self.overlay = Some(Overlay::Picker(Picker {
-                            cwd: self.local.clone(),
-                            entries: Vec::new(),
-                            selected: 0,
-                            hidden: false,
-                            loading: true,
-                            generation: id,
-                            error: None,
-                            input: Editor::default(),
-                            chosen: HashSet::new(),
-                            match_root: self.local.clone(),
-                            pattern: false,
-                            truncated: false,
-                        }));
-                        self.requests.push(Request::MatchPaths {
-                            id,
-                            input: String::new(),
-                            cwd: self.local.clone(),
-                            hidden: false,
-                        });
+                        self.open_picker(PickerPurpose::Upload);
                     }
                     Action::Download => {
                         let files: Vec<_> = self
@@ -1044,14 +1035,7 @@ impl Model {
                             .iter()
                             .map(|f| format!("repo:{}{}", location.repo, f.path))
                             .collect();
-                        self.overlay = Some(Overlay::Form(Form::new(
-                            FormKind::Download(remotes),
-                            "Download files",
-                            vec![Field::new(
-                                "Save into an existing local directory",
-                                self.local.display().to_string(),
-                            )],
-                        )));
+                        self.open_picker(PickerPurpose::Download { remotes });
                     }
                     Action::Share => {
                         let Some(file) = self.current_file() else {
@@ -1278,7 +1262,42 @@ impl Model {
             input: picker.input.text.clone(),
             cwd: picker.cwd.clone(),
             hidden: picker.hidden,
+            directories_only: picker.directories_only(),
         });
+    }
+
+    fn open_picker(&mut self, purpose: PickerPurpose) {
+        let mut picker = Picker {
+            purpose,
+            cwd: self.local.clone(),
+            entries: Vec::new(),
+            selected: 0,
+            hidden: false,
+            loading: true,
+            generation: 0,
+            error: None,
+            input: Editor::default(),
+            chosen: HashSet::new(),
+            match_root: self.local.clone(),
+            pattern: false,
+            truncated: false,
+        };
+        self.refresh_paths(&mut picker);
+        self.overlay = Some(Overlay::Picker(picker));
+    }
+
+    fn review_download(&mut self, picker: &Picker, directory: &std::path::Path) {
+        let PickerPurpose::Download { remotes } = &picker.purpose else {
+            return;
+        };
+        self.overlay = Some(Overlay::Form(Form::new(
+            FormKind::Download(remotes.clone()),
+            "Download files",
+            vec![Field::new(
+                "Save into an existing local directory",
+                directory.display().to_string(),
+            )],
+        )));
     }
 
     fn review_upload(&mut self, files: Vec<PathBuf>) {
@@ -1428,7 +1447,17 @@ impl Model {
                         picker.input = Editor::default();
                         reload = true;
                     }
-                    KeyCode::Char('a') if control => {
+                    KeyCode::Char('d') if control && picker.directories_only() => {
+                        if let Some(entry) = picker
+                            .entries
+                            .get(picker.selected)
+                            .filter(|entry| entry.is_dir)
+                        {
+                            self.review_download(picker, &entry.path);
+                            return;
+                        }
+                    }
+                    KeyCode::Char('a') if control && !picker.directories_only() => {
                         let files: HashSet<_> = picker
                             .entries
                             .iter()
@@ -1441,7 +1470,7 @@ impl Model {
                             picker.chosen = files;
                         }
                     }
-                    KeyCode::Char(' ') if control => {
+                    KeyCode::Char(' ') if control && !picker.directories_only() => {
                         if let Some(entry) =
                             picker.entries.get(picker.selected).filter(|e| !e.is_dir)
                         {
@@ -1475,11 +1504,14 @@ impl Model {
                             return;
                         }
                         if let Some(entry) = picker.entries.get(picker.selected) {
-                            if entry.is_dir {
+                            if picker.is_current_directory(entry) {
+                                self.review_download(picker, &entry.path);
+                                return;
+                            } else if entry.is_dir {
                                 picker.cwd = entry.path.clone();
                                 picker.input = Editor::default();
                                 reload = true;
-                            } else {
+                            } else if !picker.directories_only() {
                                 self.review_upload(vec![entry.path.clone()]);
                                 return;
                             }
@@ -1963,6 +1995,19 @@ impl Model {
                         match result {
                             Ok(matches) => {
                                 picker.entries = matches.entries;
+                                if picker.directories_only() {
+                                    if let Some(directory) = matches.directory {
+                                        picker.entries.insert(
+                                            0,
+                                            LocalEntry {
+                                                name: ".".into(),
+                                                path: directory,
+                                                is_dir: true,
+                                                size: None,
+                                            },
+                                        );
+                                    }
+                                }
                                 picker.match_root = matches.root;
                                 picker.pattern = matches.pattern;
                                 picker.truncated = matches.truncated;

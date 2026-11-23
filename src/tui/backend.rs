@@ -64,6 +64,7 @@ pub enum Request {
         input: String,
         cwd: PathBuf,
         hidden: bool,
+        directories_only: bool,
     },
     CreateShare {
         id: u64,
@@ -407,9 +408,15 @@ fn execute_with_context(
             input,
             cwd,
             hidden,
+            directories_only,
         } => Message::PathMatches {
             id,
-            result: super::paths::matches(&input, &cwd, hidden).map_err(error_text),
+            result: if directories_only {
+                super::paths::directories(&input, &cwd, hidden)
+            } else {
+                super::paths::matches(&input, &cwd, hidden)
+            }
+            .map_err(error_text),
         },
         Request::CreateShare {
             id,

@@ -99,6 +99,25 @@ impl Language {
 }
 
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("DOWNLOAD · CHOOSE A DIRECTORY", "下载 · 选择保存目录"),
+    (
+        "Type a directory path. Tab completes; Enter opens or selects.",
+        "输入目录路径，Tab 补全，Enter 进入或选用。",
+    ),
+    ("Use this directory", "使用此目录"),
+    ("{0} directories", "{0} 个目录"),
+    (
+        "↑↓ select  tab complete  enter open/use  esc cancel",
+        "↑↓ 选择  tab 补全  enter 进入/选用  esc 取消",
+    ),
+    (
+        "Ctrl+D use directory · Alt+↑ parent · Alt+. hidden · Ctrl+L clear",
+        "Ctrl+D 选用 · Alt+↑ 上级 · Alt+. 隐藏项 · Ctrl+L 清空",
+    ),
+    (
+        "Choose an existing local directory.",
+        "请选择已有的本地目录。",
+    ),
     ("Loading libraries", "正在加载资料库"),
     ("Revoking share link", "正在撤销分享链接"),
     ("Token rejected", "Token 验证失败"),

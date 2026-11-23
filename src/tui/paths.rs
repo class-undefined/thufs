@@ -9,6 +9,7 @@ use super::{
 };
 
 pub struct PathMatches {
+    pub directory: Option<PathBuf>,
     pub root: PathBuf,
     pub entries: Vec<LocalEntry>,
     pub pattern: bool,
@@ -33,6 +34,36 @@ pub fn resolve(input: &str, cwd: &Path) -> PathBuf {
 }
 
 pub fn matches(input: &str, cwd: &Path, hidden: bool) -> Result<PathMatches> {
+    matches_filtered(input, cwd, hidden, false)
+}
+
+pub fn directories(input: &str, cwd: &Path, hidden: bool) -> Result<PathMatches> {
+    let target = resolve(input, cwd);
+    if target.is_dir() {
+        let input = format!(
+            "{}{}",
+            target
+                .to_str()
+                .context("The path is not valid UTF-8.")?
+                .trim_end_matches(std::path::MAIN_SEPARATOR),
+            std::path::MAIN_SEPARATOR
+        );
+        let mut result = matches_filtered(&input, cwd, hidden, true)?;
+        result.directory = Some(target);
+        Ok(result)
+    } else if target.is_file() {
+        bail!("Choose an existing local directory.")
+    } else {
+        matches_filtered(input, cwd, hidden, true)
+    }
+}
+
+fn matches_filtered(
+    input: &str,
+    cwd: &Path,
+    hidden: bool,
+    directories_only: bool,
+) -> Result<PathMatches> {
     let target = resolve(input, cwd);
     let pattern = input.contains(['*', '?', '[']) && !target.exists();
     if input.contains("**") {
@@ -75,6 +106,9 @@ pub fn matches(input: &str, cwd: &Path, hidden: bool) -> Result<PathMatches> {
         for entry in glob_with(&expression, options).context("Invalid path pattern")? {
             let path = entry.context("Cannot read a matching path")?;
             if let Some(entry) = entry_for(path) {
+                if directories_only && !entry.is_dir {
+                    continue;
+                }
                 if entries.len() == 2000 {
                     truncated = true;
                     break;
@@ -84,6 +118,7 @@ pub fn matches(input: &str, cwd: &Path, hidden: bool) -> Result<PathMatches> {
         }
         entries.sort_by(|a, b| (!a.is_dir).cmp(&(!b.is_dir)).then(a.path.cmp(&b.path)));
         return Ok(PathMatches {
+            directory: None,
             root,
             entries,
             pattern,
@@ -112,6 +147,9 @@ pub fn matches(input: &str, cwd: &Path, hidden: bool) -> Result<PathMatches> {
         )
     };
     let mut entries = local_entries(&root, hidden || needle.starts_with('.'))?;
+    if directories_only {
+        entries.retain(|entry| entry.is_dir);
+    }
     if !needle.is_empty() {
         entries.retain(|e| fuzzy_score(&e.name, &needle).is_some());
         entries.sort_by_key(|e| {
@@ -125,6 +163,7 @@ pub fn matches(input: &str, cwd: &Path, hidden: bool) -> Result<PathMatches> {
     let truncated = entries.len() > 2000;
     entries.truncate(2000);
     Ok(PathMatches {
+        directory: None,
         root,
         entries,
         pattern,
@@ -370,5 +409,44 @@ mod tests {
                 PathBuf::from(home).join("Downloads")
             );
         }
+    }
+
+    #[test]
+    fn directory_matching_excludes_files_and_can_select_an_empty_directory() {
+        let temp = fixture();
+        let result = directories("", temp.path(), false).unwrap();
+        assert!(result.directory.is_some());
+        assert_eq!(result.entries.len(), 1);
+        assert!(result.entries.iter().all(|entry| entry.is_dir));
+        let empty = temp.path().join("folder");
+        let result = directories(empty.to_str().unwrap(), temp.path(), false).unwrap();
+        assert_eq!(result.directory, Some(empty));
+        assert!(result.entries.is_empty());
+    }
+
+    #[test]
+    fn directory_matching_supports_prefixes_spaces_hidden_names_and_rejects_files() {
+        let temp = fixture();
+        for name in ["下载 资料", ".hidden-folder"] {
+            std::fs::create_dir(temp.path().join(name)).unwrap();
+        }
+        let prefix = directories("下载", temp.path(), false).unwrap();
+        assert!(prefix.directory.is_none());
+        assert_eq!(prefix.entries[0].name, "下载 资料");
+        assert!(
+            !directories("", temp.path(), false)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.name.starts_with('.'))
+        );
+        assert!(
+            directories("", temp.path(), true)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.name == ".hidden-folder")
+        );
+        assert!(directories("results.csv", temp.path(), false).is_err());
     }
 }

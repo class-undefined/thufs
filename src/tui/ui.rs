@@ -1596,7 +1596,19 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
 }
 
 fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
-    let area = popup(frame, 96, 27, " UPLOAD · CHOOSE A LOCAL FILE ", t, false);
+    let directory_mode = picker.directories_only();
+    let area = popup(
+        frame,
+        96,
+        27,
+        if directory_mode {
+            " DOWNLOAD · CHOOSE A DIRECTORY "
+        } else {
+            " UPLOAD · CHOOSE A LOCAL FILE "
+        },
+        t,
+        false,
+    );
     let inner = area.inner(Margin::new(2, 1));
     frame.render_widget(
         Paragraph::new(format!(
@@ -1618,18 +1630,28 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
     );
     if picker.input.text.is_empty() {
         frame.render_widget(
-            Paragraph::new(
-                t.language.tr(
-                    "Type a path, file name, or pattern. Tab completes; Enter opens or selects.",
-                ),
-            )
+            Paragraph::new(t.language.tr(if directory_mode {
+                "Type a directory path. Tab completes; Enter opens or selects."
+            } else {
+                "Type a path, file name, or pattern. Tab completes; Enter opens or selects."
+            }))
             .style(t.muted()),
             input_area,
         );
     } else {
         editor(frame, &picker.input, input_area, false, t);
     }
-    let count = if picker.chosen.is_empty() {
+    let count = if directory_mode {
+        t.language.format(
+            "{0} directories",
+            &[picker
+                .entries
+                .iter()
+                .filter(|entry| !picker.is_current_directory(entry))
+                .count()
+                .to_string()],
+        )
+    } else if picker.chosen.is_empty() {
         t.language
             .format("{0} items", &[picker.entries.len().to_string()])
     } else {
@@ -1692,13 +1714,23 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
             } else {
                 Style::default()
             };
-            let display = entry
-                .path
-                .strip_prefix(&picker.match_root)
-                .unwrap_or(&entry.path)
-                .display()
-                .to_string();
-            let marker = if picker.chosen.contains(&entry.path) {
+            let display = if picker.is_current_directory(entry) {
+                format!(
+                    "{}  {}",
+                    t.language.tr("Use this directory"),
+                    entry.path.display()
+                )
+            } else {
+                entry
+                    .path
+                    .strip_prefix(&picker.match_root)
+                    .unwrap_or(&entry.path)
+                    .display()
+                    .to_string()
+            };
+            let marker = if picker.is_current_directory(entry) {
+                "✓"
+            } else if picker.chosen.contains(&entry.path) {
                 "●"
             } else if entry.is_dir {
                 "▸"
@@ -1724,18 +1756,20 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
         }
     }
     frame.render_widget(
-        Paragraph::new(
-            t.language
-                .tr("↑↓ select  tab complete  enter choose  ctrl+a all matches  esc cancel"),
-        )
+        Paragraph::new(t.language.tr(if directory_mode {
+            "↑↓ select  tab complete  enter open/use  esc cancel"
+        } else {
+            "↑↓ select  tab complete  enter choose  ctrl+a all matches  esc cancel"
+        }))
         .style(t.muted()),
         Rect::new(inner.x, area.bottom().saturating_sub(3), inner.width, 1),
     );
     frame.render_widget(
-        Paragraph::new(
-            t.language
-                .tr("Ctrl+L clear path · Alt+↑ parent · Alt+. hidden · Ctrl+Space select"),
-        )
+        Paragraph::new(t.language.tr(if directory_mode {
+            "Ctrl+D use directory · Alt+↑ parent · Alt+. hidden · Ctrl+L clear"
+        } else {
+            "Ctrl+L clear path · Alt+↑ parent · Alt+. hidden · Ctrl+Space select"
+        }))
         .style(t.muted()),
         Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
     );

@@ -78,9 +78,15 @@ pub fn respond(request: Request) -> Message {
             input,
             cwd,
             hidden,
+            directories_only,
         } => Message::PathMatches {
             id,
-            result: super::paths::matches(&input, &cwd, hidden).map_err(|e| e.to_string()),
+            result: if directories_only {
+                super::paths::directories(&input, &cwd, hidden)
+            } else {
+                super::paths::matches(&input, &cwd, hidden)
+            }
+            .map_err(|e| e.to_string()),
         },
         Request::Transfer { .. } | Request::CancelTransfer { .. } => {
             unreachable!("transfers are guarded by the backend")

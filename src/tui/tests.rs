@@ -57,6 +57,9 @@ fn queue_downloads(model: &mut Model, count: usize) {
         .map(|f| f.path.clone())
         .collect();
     model.action(Action::Download);
+    assert!(matches!(model.overlay, Some(Overlay::Picker(_))));
+    flush_demo(model);
+    key(model, KeyCode::Enter);
     assert!(matches!(model.overlay, Some(Overlay::Form(_))));
     key(model, KeyCode::Enter);
     assert!(model.overlay.is_none());
@@ -434,12 +437,7 @@ fn revoking_a_share_only_sends_a_request_after_confirmation() {
 fn demo_mode_never_enqueues_cloud_mutations() {
     let (_temp, mut model) = fixture();
     model.demo = true;
-    for action in [
-        Action::Download,
-        Action::Share,
-        Action::Mkdir,
-        Action::NewLibrary,
-    ] {
+    for action in [Action::Share, Action::Mkdir, Action::NewLibrary] {
         model.action(action);
         assert!(model.requests.is_empty());
     }
@@ -646,6 +644,7 @@ fn upload_picker_ignores_results_for_a_previously_opened_directory() {
     model.handle_message(Message::PathMatches {
         id: new,
         result: Ok(super::paths::PathMatches {
+            directory: None,
             root: model.local.clone(),
             entries: vec![],
             pattern: false,
@@ -660,6 +659,8 @@ fn transfer_policy_is_explicit_and_defaults_to_avoiding_overwrites() {
     let (_temp, mut model) = fixture();
     select_file(&mut model, "paper-draft.pdf");
     model.action(Action::Download);
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Enter);
     assert!(
         matches!(&model.overlay, Some(Overlay::Form(f)) if f.policy() == "uniquify" && matches!(f.kind, FormKind::Download(_)))
     );
@@ -944,4 +945,115 @@ fn invalid_and_empty_path_matches_can_be_corrected_without_closing_the_picker() 
     model.paste("available");
     flush_demo(&mut model);
     assert!(matches!(&model.overlay, Some(Overlay::Picker(p)) if p.entries.len() == 1));
+}
+
+#[test]
+fn download_picker_browses_directories_then_queues_all_selected_files_at_the_chosen_destination() {
+    let (temp, mut model) = fixture();
+    let destination = temp.path().join("下载 资料");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(temp.path().join("not-a-folder.txt"), "data").unwrap();
+    model.selected = ["/paper-draft.pdf", "/results.csv"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    model.action(Action::Download);
+    flush_demo(&mut model);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Picker(p)) if p.directories_only() && p.entries.iter().all(|entry| entry.is_dir))
+    );
+    key(&mut model, KeyCode::Down);
+    key(&mut model, KeyCode::Enter);
+    flush_demo(&mut model);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Picker(p)) if p.cwd == destination && p.entries.len() == 1)
+    );
+    key(&mut model, KeyCode::Enter);
+    assert!(model.transfers.is_empty());
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if matches!(&form.kind, FormKind::Download(remotes) if remotes.len() == 2) && std::path::Path::new(&form.fields[0].editor.text) == destination.as_path())
+    );
+    key(&mut model, KeyCode::Enter);
+    assert_eq!(model.transfers.len(), 2);
+    assert!(model.transfers.iter().all(|transfer| matches!(&transfer.spec, TransferSpec::Download { local, .. } if *local == destination)));
+}
+
+#[test]
+fn download_directory_picker_completes_paths_and_can_choose_a_highlighted_folder() {
+    let (temp, mut model) = fixture();
+    let destination = temp.path().join("results folder");
+    std::fs::create_dir(&destination).unwrap();
+    select_file(&mut model, "paper-draft.pdf");
+    model.action(Action::Download);
+    model.paste("res");
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Tab);
+    flush_demo(&mut model);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Picker(p)) if p.input.text.ends_with(std::path::MAIN_SEPARATOR) && p.entries.len() == 1)
+    );
+    ctrl(&mut model, 'd');
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if form.fields[0].editor.text.trim_end_matches(std::path::MAIN_SEPARATOR) == destination.display().to_string())
+    );
+    assert!(model.transfers.is_empty());
+}
+
+#[test]
+fn cancelling_download_directory_selection_preserves_local_path_and_remote_selection() {
+    let (_temp, mut model) = fixture();
+    select_file(&mut model, "paper-draft.pdf");
+    model.selected.insert("/paper-draft.pdf".into());
+    let local = model.local.clone();
+    let selected = model.selected.clone();
+    model.action(Action::Download);
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Esc);
+    assert!(model.overlay.is_none());
+    assert!(model.transfers.is_empty());
+    assert_eq!(model.local, local);
+    assert_eq!(model.selected, selected);
+    assert!(
+        !model
+            .requests
+            .iter()
+            .any(|request| matches!(request, Request::Transfer { .. }))
+    );
+}
+
+#[test]
+fn download_picker_rejects_files_and_recovers_to_the_current_directory() {
+    let (temp, mut model) = fixture();
+    std::fs::write(temp.path().join("file.txt"), "test").unwrap();
+    select_file(&mut model, "paper-draft.pdf");
+    model.action(Action::Download);
+    model.paste("file.txt");
+    flush_demo(&mut model);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Picker(p)) if p.error.is_some() && p.entries.is_empty())
+    );
+    ctrl(&mut model, 'd');
+    assert!(matches!(model.overlay, Some(Overlay::Picker(_))));
+    ctrl(&mut model, 'l');
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Enter);
+    assert!(matches!(model.overlay, Some(Overlay::Form(_))));
+    assert!(model.transfers.is_empty());
+}
+
+#[test]
+fn download_picker_supports_chinese_narrow_layouts_and_demo_preview_without_starting_downloads() {
+    let (_temp, mut model) = fixture();
+    model.demo = true;
+    model.settings.language = super::i18n::Language::Chinese;
+    select_file(&mut model, "paper-draft.pdf");
+    model.action(Action::Download);
+    flush_demo(&mut model);
+    let (text, _) = render(&model, 60, 18);
+    assert!(text.contains("选择保存目录"));
+    assert!(text.contains("使用此目录"));
+    key(&mut model, KeyCode::Enter);
+    key(&mut model, KeyCode::Enter);
+    assert!(matches!(&model.overlay, Some(Overlay::Form(form)) if form.error.is_some()));
+    assert!(model.transfers.is_empty());
 }

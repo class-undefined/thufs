@@ -181,6 +181,7 @@ Use `1`, `2`, `3`, or `4` to switch between Files, Transfers, Shares, and Settin
 Navigate with arrow keys or `j/k/h/l`; use `Space` to select files, `u` to upload, `d` to download, and `s` to create a share link.
 Settings supports English/Chinese, token login, saved accounts, and account switching.
 The upload picker accepts paths and wildcard patterns, with `Tab` completion and `Ctrl+A` to select all matching files before upload confirmation.
+Downloads open a directory picker with folder browsing, path input, and completion before confirming the destination.
 Press `?` for the full keyboard guide.
 
 Use `thufs tui --demo` for a read-only offline preview without credentials.
