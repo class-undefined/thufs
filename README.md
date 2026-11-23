@@ -132,6 +132,9 @@ thufs --json config show
 
 设计原则是“配置文件优先，环境变量覆盖”，这样既适合日常使用，也适合临时脚本注入。
 
+TUI 的语言和已保存账号另存于同目录的 `tui.json`。
+在 TUI 中显式选择的账号优先于 `THUFS_TOKEN`；CLI 继续按上述规则读取配置。
+
 ## 远程路径规则
 
 显式远程路径的标准形式为：
@@ -187,7 +190,7 @@ thufs upload ./report.pdf submissions/
 
 ### 交互式 TUI
 
-在已有 token 的终端中启动：
+启动交互工作区；未配置 token 时会直接显示登录表单：
 
 ```bash
 thufs tui
@@ -203,8 +206,11 @@ cargo run --locked -- tui
 
 ![thufs TUI 离线演示：资料库、文件列表和详情栏](./docs/assets/tui-files.png)
 
-按 `/` 或 `Ctrl+P` 搜索命令，按 `1`、`2`、`3` 切换文件、传输和分享工作区。
+按 `Ctrl+P` 打开命令面板；终端可转发时也支持 `Cmd+P`。
+按 `1`、`2`、`3`、`4` 切换文件、传输、分享和设置。
 支持方向键和 `j/k/h/l` 导航，`Space` 多选文件，`u` 上传、`d` 下载、`s` 创建分享。
+设置页支持中英文切换、Token 登录、保存账号和切换账号。
+上传选择器支持路径输入、`Tab` 补全和通配符匹配，`Ctrl+A` 可选择全部匹配文件，再确认上传。
 按 `?` 查看帮助。
 
 可以先用 `thufs tui --demo` 浏览只读离线演示。
@@ -441,7 +447,7 @@ thufs download repo:course-lib/slides/week1.pdf ./week1.pdf --progress jsonl
 
 - 完整双向同步
 - 递归目录上传或下载
-- 多账号配置管理
+- CLI 多账号命名配置（TUI 支持保存和切换账号）
 - 任意 Seafile 实例的通用化接入
 - GUI 或桌面常驻同步体验
 

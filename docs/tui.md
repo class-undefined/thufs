@@ -2,8 +2,8 @@
 
 ## 启动
 
-TUI 使用已有的 thufs 配置和 `THUFS_TOKEN`，无需再次登录。
-如果令牌在 shell 配置文件中设置，先在当前终端加载该文件。
+TUI 可以直接使用已有的 thufs 配置和 `THUFS_TOKEN`。
+没有可用令牌时会显示 Token 登录表单，无需先退出 TUI 执行认证命令。
 
 ```bash
 thufs tui
@@ -29,14 +29,14 @@ thufs tui --demo
 
 ## 工作区
 
-顶部的 `Files`、`Transfers` 和 `Shares` 分别对应文件、传输和分享。
-按 `1`、`2`、`3` 切换，文件位置会保留。
+顶部提供文件、传输、分享和设置四个工作区。
+按 `1`、`2`、`3`、`4` 切换，文件位置会保留。
 
 ![文件工作区的离线演示](./assets/tui-files.png)
 
 文件工作区采用深色背景、紫色焦点和绿色状态提示。
 左侧显示资料库和账号容量，中间显示目录，右侧显示所选项目的路径、体积和可用操作。
-底部固定保留命令入口、状态消息和当前快捷键。
+底部仅显示状态消息和快捷键提示。命令面板通过快捷键唤出。
 界面使用普通 Unicode 字符，无需安装 Nerd Font。
 
 最低终端尺寸为 60 × 18。
@@ -46,8 +46,9 @@ thufs tui --demo
 
 ## 命令面板
 
-按 `/`、`:` 或 `Ctrl+P` 打开命令面板。
-输入操作名称或说明中的词，使用模糊匹配查找操作。
+按 `Ctrl+P` 打开或收起命令面板。macOS 上也支持终端转发的 `Cmd+P`。
+如果终端拦截了 `Cmd+P`，使用 `Ctrl+P`。
+输入中文或英文的操作名称，也可以用说明中的词进行模糊匹配。
 按上下键选择，`Tab` 补全，`Enter` 执行，`Esc` 关闭。
 
 ![命令面板的离线演示](./assets/tui-commands.png)
@@ -55,11 +56,39 @@ thufs tui --demo
 面板提供以下命令：
 
 ```text
-/files      /upload     /download    /share
-/transfers  /shares     /goto        /mkdir
-/mkrepo     /refresh    /sort        /details
-/help       /quit
+Settings    Accounts    Sign in     Sign out
+Files       Upload      Download    Share
+Transfers   Shares      Goto        Mkdir
+Mkrepo      Refresh     Sort        Details
+Help        Quit
 ```
+
+## 设置、登录和账号切换
+
+按 `4` 打开设置，用上下键选择项目，按 `Enter` 更改。
+语言项也可以使用左右键切换，修改后立即应用并保存。
+支持 English 和简体中文；首次使用时根据 shell 的语言环境选择，之后使用保存的设置。
+文件名、路径和账号名称保持原文。
+
+![简体中文设置页](./assets/tui-settings.png)
+
+未登录时会打开 Token 表单，也可以从设置中选择“使用 Token 登录”或“添加账号”。
+粘贴清华云盘 API Token，可填写账号名称，然后按 `Enter` 验证。
+密码式输入会隐藏 Token；验证成功后才保存并激活账号。
+验证失败时保留当前账号，可以在原表单中更正 Token 后重试。
+表单中提供 [Token 获取页面](https://cloud.tsinghua.edu.cn/profile/#get-auth-token) 的地址。
+
+![Token 登录表单](./assets/tui-login.png)
+
+选择“切换账号”后，可使用已保存的账号，也可以选择环境变量或 CLI 配置中的账号。
+新账号验证成功后会清除上一账号的目录、分享和传输记录，旧请求不会覆盖新会话。
+仍有传输任务时，需要先完成或取消任务，再切换或退出账号。
+语言设置可以在传输期间更改。
+
+TUI 设置和已保存的账号保存在配置目录的 `tui.json` 中，Unix 文件权限为 `0600`。
+显式选择的 TUI 账号优先于 `THUFS_TOKEN`；未选择账号时，按环境变量和 CLI 配置的顺序读取。
+该选择只影响 TUI，CLI 的配置文件和环境变量优先级保持原样。
+“退出登录”会结束当前 TUI 会话并保持退出状态，已保存的账号仍可在列表中重新选择。
 
 ## 浏览与筛选
 
@@ -76,14 +105,43 @@ thufs tui --demo
 
 ## 上传和下载
 
-上传时先打开目标云盘目录，再按 `u`：
+上传时先打开目标云盘目录，再按 `u`。
+路径输入框支持文件名、相对路径、绝对路径和 `~`；中文和带空格的路径可直接输入。
 
-1. 在本地选择器中选择文件。`Enter` 打开目录，`h` 返回父目录，`.` 切换隐藏文件。
-2. 检查本地路径和远程目标，可直接修改两个输入框。
-3. 用 `Ctrl+O` 选择冲突策略，按 `Enter` 加入传输队列。
+```text
+report
+../results/report.pdf
+~/Downloads/论文草稿.pdf
+~/Downloads/report*.pdf
+```
 
-本地选择器支持指向普通文件或目录的有效符号链接。
-选定上传文件后，所在目录会成为新的本地工作目录。
+普通文本使用前缀和模糊匹配，`*`、`?` 和 `[ab]` 使用通配符匹配。
+上下键选择匹配结果，`Tab` 补全共同前缀或当前结果，`Enter` 打开目录或选择文件。
+路径不正确或没有匹配结果时，可以直接继续编辑。
+
+![上传路径匹配和多选](./assets/tui-upload.png)
+
+| 按键 | 选择器中的作用 |
+| --- | --- |
+| `↑` / `↓` | 选择匹配结果 |
+| `Tab` | 补全路径；目录补上分隔符 |
+| `Enter` | 打开目录，或进入上传确认 |
+| `Ctrl+A` | 选择或取消选择全部匹配文件 |
+| `Ctrl+Space` | 选择或取消选择当前文件 |
+| `Ctrl+L` | 清空输入，重新输入路径 |
+| `Alt+↑` | 返回当前浏览目录的父目录 |
+| `Alt+.` | 切换隐藏文件；直接输入 `.` 开头的名称也能匹配隐藏文件 |
+| `Esc` | 放弃选择 |
+
+确认上传前可以检查目标和冲突策略。
+单文件可以修改本地路径和远程文件名；多个文件可以统一指定远程目录。
+用 `Ctrl+O` 选择冲突策略，再按 `Enter` 加入传输队列。
+
+本地选择器支持有效的文件和目录符号链接。
+选定文件后，所在目录会成为新的本地工作目录。
+最多显示 2000 个匹配结果；结果更多时请缩小范围。
+暂不接受 `**` 递归通配符，也不递归上传文件夹。
+离线演示可以浏览本地文件并查看上传确认，但不会执行传输。
 
 下载时选中文件，按 `d`，检查保存目录后确认。
 有多选文件时会逐个入队；没有多选时下载当前文件。
@@ -123,8 +181,8 @@ thufs tui --demo
 
 | 按键 | 作用 |
 | --- | --- |
-| `1` / `2` / `3` | 文件 / 传输 / 分享 |
-| `/` / `:` / `Ctrl+P` | 命令面板 |
+| `1` / `2` / `3` / `4` | 文件 / 传输 / 分享 / 设置 |
+| `Ctrl+P` / 可转发的 `Cmd+P` | 打开或收起命令面板 |
 | `↑` / `↓`、`j` / `k` | 移动光标 |
 | `Enter` / `→` / `l` | 打开项目或查看详情 |
 | `←` / `h` / 退格键 | 父目录或资料库列表 |
@@ -141,7 +199,8 @@ thufs tui --demo
 | `q` / `Ctrl+C` | 退出；有传输时先确认 |
 
 输入框支持中文、组合字符、emoji 和终端粘贴。
-`Ctrl+A/E` 移到行首或行尾，`Ctrl+U/K` 删除光标前或后的内容，`Ctrl+W` 删除前一个词。
+普通表单中，`Ctrl+A/E` 移到行首或行尾；`Ctrl+U/K` 删除光标前或后的内容，`Ctrl+W` 删除前一个词。
+路径选择器中的 `Ctrl+A` 用于全选匹配文件，编辑路径时可用 `Home` 移到行首。
 
 主工作区支持鼠标单击选择、双击打开、点击工作区标签和滚轮移动列表。
 需要用鼠标选择终端文字时，可关闭鼠标捕获：
@@ -160,14 +219,15 @@ macOS 使用 `pbcopy` 复制，Windows 使用 `clip`，Linux 依次尝试 `wl-co
 
 | 参考 | 本项目采用的方式 |
 | --- | --- |
-| [Codex 命令弹窗](https://github.com/openai/codex/blob/main/codex-rs/tui/src/bottom_pane/command_popup.rs) | 底部命令入口、可搜索的操作列表、名称和说明并列展示 |
+| [Codex 命令弹窗](https://github.com/openai/codex/blob/main/codex-rs/tui/src/bottom_pane/command_popup.rs) | 快捷键唤出的操作列表、名称和说明并列展示 |
 | [Yazi 导航](https://yazi-rs.github.io/docs/quick-start/) | 方向键和 Vim 键位并存，进入目录、返回父目录和多选操作 |
 | [Lazygit 快捷键](https://github.com/jesseduffield/lazygit/blob/master/docs/keybindings/Keybindings_en.md) | 根据当前工作区展示操作提示，确认后执行会改变远程状态的操作 |
 | [Ratatui 渲染](https://ratatui.rs/concepts/rendering/) | 状态驱动的界面绘制，将网络等待与输入循环分开 |
 
-代码按职责分为终端生命周期、状态与事件、后台操作、绘制和输入编辑五部分。
+代码将终端生命周期、状态与事件、后台操作、绘制、输入编辑、账号设置和路径匹配分开。
 资料库、目录和分享读取在后台线程执行，请求编号用于丢弃旧目录的延迟响应。
 后台操作最多同时执行 4 个，尚未开始的同类读取只保留最新请求。
+账号切换还会递增会话代次，丢弃旧账号的延迟响应。令牌通过会话参数传给服务，通过子进程环境传给传输，不修改全局环境。
 TUI 中的元数据 HTTP 请求设置 30 秒超时，连接超时为 10 秒。
 
 传输启动同一 thufs 可执行文件，使用 `--json` 和 `--progress jsonl` 读取结果和进度。
@@ -178,3 +238,6 @@ TUI 中的元数据 HTTP 请求设置 30 秒超时，连接超时为 10 秒。
 TUI 需要交互式 stdin、stdout 和支持光标控制的终端，不接受 `--json`。
 文件详情仅展示元数据；当前不支持递归目录传输、文件内容预览和跨会话队列恢复。
 下载使用 CLI 默认的单线程模式，需要指定并发模式时可使用 `thufs download --mode parallel`。
+
+路径匹配使用 [glob 的匹配规则](https://docs.rs/glob/latest/glob/fn.glob_with.html)。
+修饰键读取使用 [Crossterm 的键盘增强协议](https://docs.rs/crossterm/0.28.1/crossterm/event/struct.PushKeyboardEnhancementFlags.html)，启动和退出时成对设置与恢复。

@@ -114,6 +114,9 @@ Supported environment overrides:
 
 The model is file-first configuration with environment overrides for temporary sessions and scripts.
 
+TUI language preferences and saved accounts live in `tui.json` alongside the CLI configuration.
+An account explicitly selected in the TUI takes priority over `THUFS_TOKEN` for that TUI session; CLI configuration behavior stays the same.
+
 ## Remote Path Syntax
 
 The canonical explicit remote form is:
@@ -157,7 +160,7 @@ thufs upload ./report.pdf submissions/
 
 ## Quick Start
 
-Open the interactive workspace with your existing token:
+Open the interactive workspace. If no token is configured, the TUI opens a token login form:
 
 ```bash
 thufs tui
@@ -173,8 +176,11 @@ cargo run --locked -- tui
 
 ![thufs offline demo: libraries, file browser, and inspector](./docs/assets/tui-files.png)
 
-Press `/` or `Ctrl+P` to search commands, and `1`, `2`, or `3` to switch between Files, Transfers, and Shares.
+Press `Ctrl+P` to open the command palette (`Cmd+P` also works when forwarded by the terminal).
+Use `1`, `2`, `3`, or `4` to switch between Files, Transfers, Shares, and Settings.
 Navigate with arrow keys or `j/k/h/l`; use `Space` to select files, `u` to upload, `d` to download, and `s` to create a share link.
+Settings supports English/Chinese, token login, saved accounts, and account switching.
+The upload picker accepts paths and wildcard patterns, with `Tab` completion and `Ctrl+A` to select all matching files before upload confirmation.
 Press `?` for the full keyboard guide.
 
 Use `thufs tui --demo` for a read-only offline preview without credentials.
@@ -370,7 +376,7 @@ Download mode can also be controlled explicitly:
 
 - full bidirectional sync
 - recursive directory transfer
-- multi-account profile management
+- named multi-account CLI profiles (the TUI supports saved accounts and account switching)
 - generic support for arbitrary Seafile instances
 - GUI or desktop resident sync behavior
 
