@@ -179,23 +179,13 @@ jobs:
         run: |
           release_tag="${GITHUB_REF_NAME}"
           version="${release_tag#v}"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$release_tag" \
+            --jq '.body' > generated-notes.md
           {
             echo "## thufs ${version}"
             echo
-            echo "Highlights:"
-            echo
-            echo "- download now defaults to sequential mode, so ordinary downloads no longer start with parallel Range requests"
-            echo "- new-file sequential downloads send a plain GET instead of \`Range: bytes=0-\`, avoiding servers that reject Range even after fallback"
-            echo "- \`--mode auto\` remains available when you explicitly want parallel probing with warning-based fallback"
-            echo "- \`--mode parallel\` remains strict and still fails when a range request cannot be completed"
-            echo "- README and \`download --help\` now document sequential as the default mode"
-            echo
-            echo "Example:"
-            echo
-            echo '```bash'
-            echo "thufs download repo:course/a.zip ./a.zip"
-            echo "thufs download --mode auto repo:course/a.zip ./a.zip --progress jsonl"
-            echo '```'
+            cat generated-notes.md
             echo
             echo "Install from crates.io:"
             echo
@@ -219,6 +209,7 @@ jobs:
           else
             gh release create "$release_tag" \
               --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
               --title "$release_tag" \
               --notes-file release-notes.md
           fi
