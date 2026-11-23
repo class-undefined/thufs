@@ -24,6 +24,7 @@
 
 ## 功能特性
 
+- `tui` 交互式云盘工作区，支持命令面板、文件浏览、传输队列和分享管理
 - `info` 查看当前 token 对应的账号信息
 - `repos` 或 `libraries` 查看当前可见的仓库或资料库
 - `ls` 查看远程目录内容，支持 repo 根目录
@@ -183,6 +184,32 @@ thufs upload ./report.pdf submissions/
 而单独的 `repo:<path>` 在没有仓库名时是不完整的，因此不作为标准语法。
 
 ## 快速开始
+
+### 交互式 TUI
+
+在已有 token 的终端中启动：
+
+```bash
+thufs tui
+thufs tui repo:course-lib/slides
+thufs tui --local ~/Downloads
+```
+
+从当前源码运行：
+
+```bash
+cargo run --locked -- tui
+```
+
+![thufs TUI 离线演示：资料库、文件列表和详情栏](./docs/assets/tui-files.png)
+
+按 `/` 或 `Ctrl+P` 搜索命令，按 `1`、`2`、`3` 切换文件、传输和分享工作区。
+支持方向键和 `j/k/h/l` 导航，`Space` 多选文件，`u` 上传、`d` 下载、`s` 创建分享。
+按 `?` 查看帮助。
+
+可以先用 `thufs tui --demo` 浏览只读离线演示。
+最低终端尺寸为 60 × 18；窄屏下按 `Tab` 切换资料库和文件列表。
+完整交互说明、设计参考和使用边界见 [TUI 文档](./docs/tui.md)。
 
 ### 查看账号信息
 
@@ -386,6 +413,7 @@ thufs download repo:course-lib/slides/week1.pdf ./week1.pdf --progress jsonl
 
 | 命令 | 作用 |
 | --- | --- |
+| `thufs tui [remote]` | 打开交互式云盘工作区 |
 | `thufs info` | 查看当前 token 对应账号信息 |
 | `thufs repos` | 列出当前可见仓库 |
 | `thufs ls <remote>` | 列出远程目录内容 |

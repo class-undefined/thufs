@@ -17,6 +17,7 @@ Instead of being a heavy sync client, `thufs` is designed for SSH sessions, remo
 
 ## Highlights
 
+- `tui` for an interactive workspace with a command palette, file browser, transfer queue, and share management
 - `info` to inspect the current token's account info
 - `repos` or `libraries` to list visible repositories
 - `ls` to list remote directories, including repo roots
@@ -156,6 +157,31 @@ thufs upload ./report.pdf submissions/
 
 ## Quick Start
 
+Open the interactive workspace with your existing token:
+
+```bash
+thufs tui
+thufs tui repo:course-lib/slides
+thufs tui --local ~/Downloads
+```
+
+From the current source checkout:
+
+```bash
+cargo run --locked -- tui
+```
+
+![thufs offline demo: libraries, file browser, and inspector](./docs/assets/tui-files.png)
+
+Press `/` or `Ctrl+P` to search commands, and `1`, `2`, or `3` to switch between Files, Transfers, and Shares.
+Navigate with arrow keys or `j/k/h/l`; use `Space` to select files, `u` to upload, `d` to download, and `s` to create a share link.
+Press `?` for the full keyboard guide.
+
+Use `thufs tui --demo` for a read-only offline preview without credentials.
+The minimum terminal size is 60 × 18. On narrow terminals, `Tab` switches between libraries and files.
+Use `--no-mouse` for normal terminal text selection. A nonempty `NO_COLOR` disables the color palette.
+See the [TUI guide and design notes (Chinese)](./docs/tui.md) for details.
+
 Account info:
 
 ```bash
@@ -294,7 +320,7 @@ echo "saved to: $FINAL_PATH"
 - `--progress jsonl` streams JSON Lines progress events to stderr for GUIs, task queues, and scripts that need precise transfer percentages
 - `--progress none` disables transfer progress output
 - `download` uses `.thufs-part` temporary files and resumes when the server supports range requests
-- `download` prefers parallel ranged download by default and automatically falls back to sequential mode when the endpoint or current resume state does not allow it
+- `download` uses sequential mode by default; `--mode auto` tries parallel ranged downloads and falls back to sequential mode when needed
 - `upload` performs best-effort resume using Seafile's uploaded-bytes mechanism
 
 Machine-readable progress examples:
@@ -315,15 +341,16 @@ Each line is a standalone JSON event with:
 
 Download mode can also be controlled explicitly:
 
-- `--mode auto` default behavior, prefer parallel and fall back when needed
+- `--mode auto` prefer parallel and fall back when needed
 - `--mode parallel` require parallel ranged download and fail if unsupported
-- `--mode sequential` always use single-stream download
+- `--mode sequential` default behavior, always use single-stream download
 - `--workers N` set the number of parallel workers; only used by parallel download
 
 ## Command Overview
 
 | Command | Purpose |
 | --- | --- |
+| `thufs tui [remote]` | Open the interactive cloud workspace |
 | `thufs info` | Show account info for the current token |
 | `thufs repos` | List visible repositories |
 | `thufs ls <remote>` | List a remote directory |
