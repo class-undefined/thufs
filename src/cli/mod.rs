@@ -10,6 +10,7 @@ mod repos;
 mod root;
 mod share;
 mod shares;
+mod tui;
 mod unshare;
 
 use anyhow::Result;
@@ -35,6 +36,7 @@ pub fn execute(app: &App, matches: ArgMatches) -> Result<()> {
         Some(("share", sub_matches)) => share::handle(app, sub_matches),
         Some(("shares", sub_matches)) => shares::handle(app, sub_matches),
         Some(("unshare", sub_matches)) => unshare::handle(app, sub_matches),
+        Some(("tui", sub_matches)) => tui::handle(sub_matches),
         _ => Ok(()),
     }
 }

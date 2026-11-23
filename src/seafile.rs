@@ -168,12 +168,23 @@ pub struct SeafileClient {
 
 impl SeafileClient {
     pub fn new(config: ConfigManager) -> Self {
+        Self::build(config, None)
+    }
+
+    pub fn with_request_timeout(config: ConfigManager, timeout: std::time::Duration) -> Self {
+        Self::build(config, Some(timeout))
+    }
+
+    fn build(config: ConfigManager, timeout: Option<std::time::Duration>) -> Self {
+        let mut builder = Client::builder().user_agent("curl/8.5.0");
+        if let Some(timeout) = timeout {
+            builder = builder
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(timeout);
+        }
         Self {
             config,
-            http: Client::builder()
-                .user_agent("curl/8.5.0")
-                .build()
-                .expect("failed to build HTTP client"),
+            http: builder.build().expect("failed to build HTTP client"),
         }
     }
 

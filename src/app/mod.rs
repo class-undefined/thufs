@@ -31,7 +31,16 @@ impl App {
     pub fn new() -> Self {
         let config = ConfigManager::new();
         let seafile = SeafileClient::new(config.clone());
+        Self::with_client(config, seafile)
+    }
 
+    pub fn with_request_timeout(timeout: std::time::Duration) -> Self {
+        let config = ConfigManager::new();
+        let seafile = SeafileClient::with_request_timeout(config.clone(), timeout);
+        Self::with_client(config, seafile)
+    }
+
+    fn with_client(config: ConfigManager, seafile: SeafileClient) -> Self {
         Self {
             renderer: Renderer::new(),
             account_service: AccountService::new(seafile.clone()),

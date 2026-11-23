@@ -1,0 +1,113 @@
+use crate::app::{
+    account_service::{AccountInfoResult, RepoItem},
+    list_service::ListItem,
+    share_service::ShareItem,
+};
+
+use super::backend::{Message, Request};
+
+/// An explicit offline fixture. No cloud requests or filesystem writes are allowed here.
+pub fn respond(request: Request) -> Message {
+    match request {
+        Request::Account => Message::Account(Ok(AccountInfoResult {
+            login_id: None,
+            name: Some("Demo workspace".into()),
+            email: "demo@example.invalid".into(),
+            contact_email: None,
+            is_staff: None,
+            usage: Some(8_375_186_227),
+            total: Some(107_374_182_400),
+            space_usage: None,
+            institution: Some("Tsinghua University".into()),
+            department: None,
+        })),
+        Request::Repositories { id } => Message::Repositories {
+            id,
+            result: Ok([
+                ("demo-research", "Research"),
+                ("demo-courses", "Coursework"),
+                ("demo-personal", "Personal"),
+            ]
+            .into_iter()
+            .map(|(id, name)| RepoItem {
+                id: id.into(),
+                name: name.into(),
+            })
+            .collect()),
+        },
+        Request::Directory { id, location } => Message::Directory {
+            id,
+            result: Ok(entries(&location.path)),
+        },
+        Request::Shares { id } => Message::Shares {
+            id,
+            result: Ok(vec![ShareItem {
+                repo: Some("Research".into()),
+                repo_id: Some("demo-research".into()),
+                path: Some("/paper-draft.pdf".into()),
+                token: Some("demo-offline-link".into()),
+                link: "https://example.invalid/demo-share/".into(),
+                url: "https://example.invalid/demo-share/".into(),
+                is_dir: Some(false),
+                created_at: Some("2026-11-23".into()),
+                expire_date: Some("2026-11-30".into()),
+                view_count: Some(12),
+            }]),
+        },
+        Request::CreateShare { id, .. }
+        | Request::CreateRepository { id, .. }
+        | Request::CreateDirectory { id, .. }
+        | Request::Revoke { id, .. } => Message::Operation {
+            id,
+            result: Err("Demo is read-only".into()),
+        },
+        Request::Copy(text) => super::backend::execute(Request::Copy(text)),
+        Request::LocalDirectory { id, .. } => Message::LocalDirectory {
+            id,
+            result: Err("Demo is read-only".into()),
+        },
+        Request::Transfer { .. } | Request::CancelTransfer { .. } => {
+            unreachable!("transfers are guarded by the backend")
+        }
+    }
+}
+
+pub fn entries(path: &str) -> Vec<ListItem> {
+    let rows = if path == "/" {
+        vec![
+            ("experiments", "dir", None),
+            ("datasets", "dir", None),
+            ("读书笔记", "dir", None),
+            ("paper-draft.pdf", "file", Some(2_560_000)),
+            ("results.csv", "file", Some(148_224)),
+            ("README.md", "file", Some(3_420)),
+            ("模型参数.json", "file", Some(8_192)),
+            ("training-curves.png", "file", Some(582_400)),
+        ]
+    } else if path.ends_with("experiments") {
+        vec![
+            ("run-001", "dir", None),
+            ("run-002", "dir", None),
+            ("ablation-study.csv", "file", Some(98_304)),
+            ("experiment-notes.md", "file", Some(6_400)),
+        ]
+    } else if path.ends_with("datasets") {
+        vec![
+            ("benchmark.jsonl", "file", Some(18_874_368)),
+            ("dataset-card.md", "file", Some(4_096)),
+        ]
+    } else if path.ends_with("读书笔记") {
+        vec![("本周阅读.md", "file", Some(7_168))]
+    } else {
+        Vec::new()
+    };
+    rows.into_iter()
+        .map(|(name, kind, size)| ListItem {
+            name: name.into(),
+            path: format!("{}/{name}", path.trim_end_matches('/')),
+            kind: kind.into(),
+            size,
+            updated_at: None,
+        })
+        .collect()
+}

@@ -5,6 +5,7 @@ mod contract;
 mod output;
 mod seafile;
 mod transfer;
+mod tui;
 
 use anyhow::Result;
 use app::App;
