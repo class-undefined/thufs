@@ -34,8 +34,7 @@ impl App {
         Self::with_client(config, seafile)
     }
 
-    pub fn with_request_timeout(timeout: std::time::Duration) -> Self {
-        let config = ConfigManager::new();
+    pub fn with_config_and_timeout(config: ConfigManager, timeout: std::time::Duration) -> Self {
         let seafile = SeafileClient::with_request_timeout(config.clone(), timeout);
         Self::with_client(config, seafile)
     }

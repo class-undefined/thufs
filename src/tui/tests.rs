@@ -73,7 +73,19 @@ fn render(model: &Model, width: u16, height: u16) -> (String, ui::HitMap) {
         .buffer()
         .content
         .chunks(width as usize)
-        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .map(|row| {
+            let mut text = String::new();
+            let mut continuation = 0;
+            for cell in row {
+                if continuation > 0 {
+                    continuation -= 1;
+                    continue;
+                }
+                text.push_str(cell.symbol());
+                continuation = ui::cell_width(cell.symbol()).saturating_sub(1);
+            }
+            text
+        })
         .collect::<Vec<_>>()
         .join("\n");
     (text, hits)
@@ -214,7 +226,7 @@ fn slash_palette_is_searchable_and_text_shortcuts_do_not_trigger_actions() {
     let (_temp, mut model) = fixture();
     ctrl(&mut model, 'u');
     assert!(model.overlay.is_none());
-    key(&mut model, KeyCode::Char('/'));
+    ctrl(&mut model, 'p');
     model.paste("trns");
     key(&mut model, KeyCode::Enter);
     assert_eq!(model.workspace, Workspace::Transfers);
@@ -423,7 +435,6 @@ fn demo_mode_never_enqueues_cloud_mutations() {
     let (_temp, mut model) = fixture();
     model.demo = true;
     for action in [
-        Action::Upload,
         Action::Download,
         Action::Share,
         Action::Mkdir,
@@ -497,7 +508,12 @@ fn editor_handles_multibyte_scrolling_and_sanitizes_pasted_control_characters() 
 fn all_workspaces_and_overlays_render_at_supported_terminal_sizes() {
     let (_temp, mut model) = fixture();
     for (width, height) in [(128, 36), (100, 30), (80, 22), (60, 18), (40, 12), (1, 1)] {
-        for workspace in [Workspace::Files, Workspace::Transfers, Workspace::Shares] {
+        for workspace in [
+            Workspace::Files,
+            Workspace::Transfers,
+            Workspace::Shares,
+            Workspace::Settings,
+        ] {
             model.switch(workspace);
             let (text, _) = render(&model, width, height);
             if width >= 60 {
@@ -615,21 +631,26 @@ fn jump_paths_cannot_escape_a_library_root() {
 fn upload_picker_ignores_results_for_a_previously_opened_directory() {
     let (_temp, mut model) = fixture();
     model.action(Action::Upload);
-    let Request::LocalDirectory { id: old, .. } = model.requests.pop().unwrap() else {
+    let Request::MatchPaths { id: old, .. } = model.requests.pop().unwrap() else {
         panic!("local request")
     };
-    key(&mut model, KeyCode::Char('.'));
-    let Request::LocalDirectory { id: new, .. } = model.requests.pop().unwrap() else {
+    model.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
+    let Request::MatchPaths { id: new, .. } = model.requests.pop().unwrap() else {
         panic!("local request")
     };
-    model.handle_message(Message::LocalDirectory {
+    model.handle_message(Message::PathMatches {
         id: old,
         result: Err("stale error".into()),
     });
     assert!(matches!(&model.overlay, Some(Overlay::Picker(p)) if p.loading && p.error.is_none()));
-    model.handle_message(Message::LocalDirectory {
+    model.handle_message(Message::PathMatches {
         id: new,
-        result: Ok(vec![]),
+        result: Ok(super::paths::PathMatches {
+            root: model.local.clone(),
+            entries: vec![],
+            pattern: false,
+            truncated: false,
+        }),
     });
     assert!(matches!(&model.overlay, Some(Overlay::Picker(p)) if !p.loading && p.error.is_none()));
 }
@@ -649,4 +670,278 @@ fn transfer_policy_is_explicit_and_defaults_to_avoiding_overwrites() {
     assert!(
         matches!(&model.transfers[0].spec, TransferSpec::Download { policy, .. } if policy == "fail")
     );
+}
+
+fn auth_result(model: &Model, email: &str) -> super::settings::AuthorizedAccount {
+    let mut account = model.account.clone().unwrap();
+    account.email = email.into();
+    account.name = Some("Next user".into());
+    super::settings::AuthorizedAccount {
+        token: super::settings::SecretToken::new("next-account-token".into()),
+        account,
+        settings: super::settings::SettingsView {
+            language: model.language(),
+            active_account: Some(format!("account:{email}")),
+            accounts: vec![super::settings::AccountChoice {
+                key: format!("account:{email}"),
+                label: "Next user".into(),
+                detail: email.into(),
+            }],
+        },
+    }
+}
+
+#[test]
+fn missing_credentials_open_a_masked_token_login_inside_the_tui() {
+    let temp = tempdir().unwrap();
+    let mut model = Model::new(temp.path().to_path_buf(), None, false);
+    model.configure_settings(
+        super::settings::SettingsView {
+            language: super::i18n::Language::English,
+            active_account: None,
+            accounts: vec![],
+        },
+        false,
+    );
+    assert!(!model.signed_in);
+    assert!(model.requests.is_empty());
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if matches!(form.kind, FormKind::Login) && form.fields[0].secret)
+    );
+    model.paste("private-login-token");
+    assert!(!render(&model, 100, 32).0.contains("private-login-token"));
+    assert!(!format!("{:?}", model.overlay).contains("private-login-token"));
+    key(&mut model, KeyCode::Enter);
+    assert!(
+        matches!(&model.requests[0], Request::Authenticate { credential: super::settings::Credential::Token { token, .. }, .. } if token.expose() == "private-login-token")
+    );
+}
+
+#[test]
+fn failed_login_preserves_the_current_account_and_allows_correcting_the_token() {
+    let (_temp, mut model) = fixture();
+    let email = model.account.as_ref().unwrap().email.clone();
+    model.action(Action::Login);
+    model.paste("incorrect-token");
+    key(&mut model, KeyCode::Enter);
+    let Request::Authenticate { id, .. } = model.requests.pop().unwrap() else {
+        panic!("authentication")
+    };
+    model.handle_message(Message::Authenticated {
+        id,
+        result: Err("Token rejected".into()),
+    });
+    assert_eq!(model.account.as_ref().unwrap().email, email);
+    assert!(model.signed_in);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if form.error.is_some() && form.fields[0].editor.text == "incorrect-token")
+    );
+    ctrl(&mut model, 'u');
+    model.paste("corrected-token");
+    key(&mut model, KeyCode::Enter);
+    assert!(matches!(
+        model.requests.pop(),
+        Some(Request::Authenticate { .. })
+    ));
+}
+
+#[test]
+fn successful_account_switch_clears_old_caches_and_ignores_late_account_responses() {
+    let (_temp, mut model) = fixture();
+    model.switch(Workspace::Shares);
+    flush_demo(&mut model);
+    let old_account = model.account.clone().unwrap();
+    let old_epoch = model.session_epoch;
+    let authorized = auth_result(&model, "next@example.com");
+    model.action(Action::Login);
+    model.paste("next-account-token");
+    key(&mut model, KeyCode::Enter);
+    let Request::Authenticate { id, .. } = model.requests.pop().unwrap() else {
+        panic!("authentication")
+    };
+    model.handle_message(Message::Authenticated {
+        id,
+        result: Ok(authorized),
+    });
+    assert_eq!(model.account.as_ref().unwrap().email, "next@example.com");
+    assert!(model.entries.is_empty());
+    assert!(model.shares.is_empty());
+    assert!(model.selected.is_empty());
+    assert!(model.transfers.is_empty());
+    assert!(model.session_epoch > old_epoch);
+    assert!(
+        matches!(&model.requests[0], Request::UseSession { token: Some(token), .. } if token.expose() == "next-account-token")
+    );
+    model.handle_message(Message::Session {
+        epoch: old_epoch,
+        message: Box::new(Message::Account(Ok(old_account))),
+    });
+    assert_eq!(model.account.as_ref().unwrap().email, "next@example.com");
+}
+
+#[test]
+fn account_switch_and_logout_are_blocked_while_transfers_are_active() {
+    let (_temp, mut model) = fixture();
+    queue_downloads(&mut model, 1);
+    model.requests.clear();
+    for action in [Action::Accounts, Action::Login, Action::SignOut] {
+        model.action(action);
+        assert!(model.overlay.is_none());
+        assert!(model.requests.is_empty());
+    }
+    model.switch(Workspace::Settings);
+    key(&mut model, KeyCode::Enter);
+    assert_eq!(model.language(), super::i18n::Language::Chinese);
+    assert!(matches!(
+        model.requests.pop(),
+        Some(Request::SaveLanguage(_))
+    ));
+}
+
+#[test]
+fn signed_out_sessions_clear_cached_data_and_remain_available_for_login() {
+    let (_temp, mut model) = fixture();
+    model.action(Action::SignOut);
+    let Request::SignOut { id } = model.requests.pop().unwrap() else {
+        panic!("sign out")
+    };
+    let settings = super::settings::SettingsView {
+        language: model.language(),
+        active_account: None,
+        accounts: vec![],
+    };
+    model.handle_message(Message::SignedOut {
+        id,
+        result: Ok(settings),
+    });
+    assert!(!model.signed_in);
+    assert!(model.account.is_none());
+    assert!(model.entries.is_empty());
+    assert_eq!(model.workspace, Workspace::Settings);
+    assert!(matches!(
+        model.requests.pop(),
+        Some(Request::UseSession { token: None, .. })
+    ));
+    model.action(Action::Upload);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if matches!(form.kind, FormKind::Login))
+    );
+}
+
+#[test]
+fn language_switch_updates_settings_files_and_commands_without_translating_filenames() {
+    let (_temp, mut model) = fixture();
+    model.switch(Workspace::Settings);
+    key(&mut model, KeyCode::Enter);
+    let (settings, _) = render(&model, 100, 32);
+    assert!(settings.contains("界面语言"));
+    assert!(settings.contains("切换账号"));
+    assert!(!settings.contains("Language"));
+    model.switch(Workspace::Files);
+    let (files, _) = render(&model, 128, 36);
+    assert!(files.contains("资料库"));
+    assert!(files.contains("名称"));
+    assert!(files.contains("大小"));
+    assert!(files.contains("README.md"));
+    ctrl(&mut model, 'p');
+    model.paste("上传");
+    assert!(render(&model, 100, 32).0.contains("选择要上传的本地文件"));
+    key(&mut model, KeyCode::Enter);
+    assert!(matches!(model.overlay, Some(Overlay::Picker(_))));
+}
+
+#[test]
+fn command_palette_uses_ctrl_or_command_p_and_has_no_permanent_command_line() {
+    let (_temp, mut model) = fixture();
+    key(&mut model, KeyCode::Char('/'));
+    key(&mut model, KeyCode::Char(':'));
+    assert!(model.overlay.is_none());
+    assert!(!render(&model, 128, 36).0.contains("/ for commands"));
+    model.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::SUPER));
+    assert!(matches!(model.overlay, Some(Overlay::Palette { .. })));
+    ctrl(&mut model, 'p');
+    assert!(model.overlay.is_none());
+}
+
+#[test]
+fn path_picker_completes_paths_with_spaces_and_reviews_the_selected_file() {
+    let (temp, mut model) = fixture();
+    std::fs::write(temp.path().join("report one.txt"), "one").unwrap();
+    std::fs::write(temp.path().join("report two.txt"), "two").unwrap();
+    model.action(Action::Upload);
+    flush_demo(&mut model);
+    model.paste("rep");
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Tab);
+    flush_demo(&mut model);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Picker(p)) if p.input.text.ends_with("report "))
+    );
+    key(&mut model, KeyCode::Down);
+    key(&mut model, KeyCode::Tab);
+    flush_demo(&mut model);
+    key(&mut model, KeyCode::Enter);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if matches!(form.kind, FormKind::Upload) && form.fields[0].editor.text.ends_with("report two.txt"))
+    );
+    assert!(model.transfers.is_empty());
+}
+
+#[test]
+fn matched_files_are_reviewed_before_upload_and_then_queued_with_explicit_paths() {
+    let (temp, mut model) = fixture();
+    for name in ["论文 a.pdf", "论文 b.pdf", "other.txt"] {
+        std::fs::write(temp.path().join(name), "test").unwrap();
+    }
+    model.action(Action::Upload);
+    model.paste("*.pdf");
+    flush_demo(&mut model);
+    ctrl(&mut model, 'a');
+    key(&mut model, KeyCode::Enter);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Form(form)) if matches!(&form.kind, FormKind::UploadMany(files) if files.len() == 2))
+    );
+    assert!(model.transfers.is_empty());
+    key(&mut model, KeyCode::Enter);
+    assert_eq!(model.transfers.len(), 2);
+    assert!(model.transfers.iter().all(|t| matches!(&t.spec, TransferSpec::Upload { remote, policy, .. } if remote.starts_with("repo:Research/论文 ") && policy == "uniquify")));
+    assert_eq!(model.transfers[0].status, TransferStatus::Running);
+    assert_eq!(model.transfers[1].status, TransferStatus::Queued);
+}
+
+#[test]
+fn batch_upload_validation_does_not_partially_queue_a_batch_if_a_file_disappears() {
+    let (temp, mut model) = fixture();
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(temp.path().join(name), "test").unwrap();
+    }
+    model.action(Action::Upload);
+    model.paste("*.txt");
+    flush_demo(&mut model);
+    ctrl(&mut model, 'a');
+    key(&mut model, KeyCode::Enter);
+    std::fs::remove_file(temp.path().join("b.txt")).unwrap();
+    key(&mut model, KeyCode::Enter);
+    assert!(model.transfers.is_empty());
+    assert!(matches!(&model.overlay, Some(Overlay::Form(form)) if form.error.is_some()));
+}
+
+#[test]
+fn invalid_and_empty_path_matches_can_be_corrected_without_closing_the_picker() {
+    let (temp, mut model) = fixture();
+    std::fs::write(temp.path().join("available.txt"), "test").unwrap();
+    model.action(Action::Upload);
+    model.paste("missing-folder/file");
+    flush_demo(&mut model);
+    assert!(matches!(&model.overlay, Some(Overlay::Picker(p)) if p.error.is_some()));
+    ctrl(&mut model, 'l');
+    model.paste("no-match");
+    flush_demo(&mut model);
+    assert!(
+        matches!(&model.overlay, Some(Overlay::Picker(p)) if p.error.is_none() && p.entries.is_empty())
+    );
+    ctrl(&mut model, 'l');
+    model.paste("available");
+    flush_demo(&mut model);
+    assert!(matches!(&model.overlay, Some(Overlay::Picker(p)) if p.entries.len() == 1));
 }

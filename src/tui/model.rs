@@ -18,6 +18,8 @@ use crate::{
 use super::{
     backend::{Message, Operation, Request},
     editor::Editor,
+    i18n::Language,
+    settings::{AuthorizedAccount, Credential, SecretToken, SettingsView, validate_token},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,7 @@ pub enum Workspace {
     Files,
     Transfers,
     Shares,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +95,10 @@ pub enum Action {
     Details,
     Help,
     Quit,
+    Settings,
+    Accounts,
+    Login,
+    SignOut,
 }
 
 pub struct PaletteCommand {
@@ -103,96 +110,136 @@ pub struct PaletteCommand {
 
 pub const COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
+        action: Action::Settings,
+        name: "Settings",
+        description: "Language and account settings",
+        key: "4",
+    },
+    PaletteCommand {
+        action: Action::Accounts,
+        name: "Accounts",
+        description: "Switch between saved accounts",
+        key: "",
+    },
+    PaletteCommand {
+        action: Action::Login,
+        name: "Sign in",
+        description: "Add an account using a token",
+        key: "",
+    },
+    PaletteCommand {
+        action: Action::SignOut,
+        name: "Sign out",
+        description: "Sign out of this workspace",
+        key: "",
+    },
+    PaletteCommand {
         action: Action::Files,
-        name: "/files",
+        name: "Files",
         description: "Browse your cloud libraries",
         key: "1",
     },
     PaletteCommand {
         action: Action::Upload,
-        name: "/upload",
+        name: "Upload",
         description: "Choose a local file to upload",
         key: "u",
     },
     PaletteCommand {
         action: Action::Download,
-        name: "/download",
+        name: "Download",
         description: "Download the selected files",
         key: "d",
     },
     PaletteCommand {
         action: Action::Share,
-        name: "/share",
+        name: "Share",
         description: "Create a link with optional password and expiry",
         key: "s",
     },
     PaletteCommand {
         action: Action::Transfers,
-        name: "/transfers",
+        name: "Transfers",
         description: "Track, cancel, or retry your transfers",
         key: "2",
     },
     PaletteCommand {
         action: Action::Shares,
-        name: "/shares",
+        name: "Shares",
         description: "Browse and revoke existing share links",
         key: "3",
     },
     PaletteCommand {
         action: Action::Jump,
-        name: "/goto",
+        name: "Goto",
         description: "Jump to a library or remote directory",
         key: "g",
     },
     PaletteCommand {
         action: Action::Mkdir,
-        name: "/mkdir",
+        name: "Mkdir",
         description: "Create a folder in the current library",
         key: "n",
     },
     PaletteCommand {
         action: Action::NewLibrary,
-        name: "/mkrepo",
+        name: "Mkrepo",
         description: "Create a new library",
         key: "N",
     },
     PaletteCommand {
         action: Action::Refresh,
-        name: "/refresh",
+        name: "Refresh",
         description: "Reload the current workspace",
         key: "r",
     },
     PaletteCommand {
         action: Action::Sort,
-        name: "/sort",
+        name: "Sort",
         description: "Cycle file sorting: name, reverse name, size",
         key: "o",
     },
     PaletteCommand {
         action: Action::Details,
-        name: "/details",
+        name: "Details",
         description: "Toggle the file inspector",
         key: "i",
     },
     PaletteCommand {
         action: Action::Help,
-        name: "/help",
+        name: "Help",
         description: "Keyboard shortcuts and workflow guide",
         key: "?",
     },
     PaletteCommand {
         action: Action::Quit,
-        name: "/quit",
+        name: "Quit",
         description: "Leave the workspace",
         key: "q",
     },
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Field {
     pub label: &'static str,
     pub editor: Editor,
     pub secret: bool,
+}
+
+impl std::fmt::Debug for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Field")
+            .field("label", &self.label)
+            .field(
+                "value",
+                &if self.secret {
+                    "[redacted]"
+                } else {
+                    &self.editor.text
+                },
+            )
+            .finish()
+    }
 }
 
 impl Field {
@@ -207,7 +254,9 @@ impl Field {
 
 #[derive(Debug, Clone)]
 pub enum FormKind {
+    Login,
     Upload,
+    UploadMany(Vec<PathBuf>),
     Download(Vec<String>),
     Share(String),
     Mkdir,
@@ -240,7 +289,10 @@ impl Form {
         ["uniquify", "overwrite", "fail"][self.conflict % 3]
     }
     pub fn is_transfer(&self) -> bool {
-        matches!(self.kind, FormKind::Upload | FormKind::Download(_))
+        matches!(
+            self.kind,
+            FormKind::Upload | FormKind::UploadMany(_) | FormKind::Download(_)
+        )
     }
 }
 
@@ -261,10 +313,16 @@ pub struct Picker {
     pub loading: bool,
     pub generation: u64,
     pub error: Option<String>,
+    pub input: Editor,
+    pub chosen: HashSet<PathBuf>,
+    pub match_root: PathBuf,
+    pub pattern: bool,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Overlay {
+    Accounts { selected: usize },
     Palette { input: Editor, selected: usize },
     Form(Form),
     Picker(Picker),
@@ -384,6 +442,11 @@ pub struct Notice {
 }
 
 pub struct Model {
+    pub settings: SettingsView,
+    pub settings_cursor: usize,
+    pub signed_in: bool,
+    pub session_epoch: u64,
+    auth_request: u64,
     pub workspace: Workspace,
     pub focus: Focus,
     pub demo: bool,
@@ -427,6 +490,15 @@ pub struct Model {
 impl Model {
     pub fn new(local: PathBuf, initial_remote: Option<String>, demo: bool) -> Self {
         let mut model = Self {
+            settings: SettingsView {
+                language: Language::English,
+                active_account: None,
+                accounts: Vec::new(),
+            },
+            settings_cursor: 0,
+            signed_in: true,
+            session_epoch: 0,
+            auth_request: 0,
             workspace: Workspace::Files,
             focus: Focus::Files,
             demo,
@@ -474,6 +546,107 @@ impl Model {
     fn id(&mut self) -> u64 {
         self.sequence += 1;
         self.sequence
+    }
+
+    pub fn configure_settings(&mut self, settings: SettingsView, has_token: bool) {
+        self.settings = settings;
+        self.signed_in = has_token || self.demo;
+        if !self.signed_in {
+            self.requests.clear();
+            self.repos_loading = false;
+            self.open_login();
+        }
+    }
+
+    pub fn language(&self) -> Language {
+        self.settings.language
+    }
+
+    fn can_switch_account(&mut self) -> bool {
+        if self.active_transfers() > 0 {
+            self.toast(
+                "Finish or cancel your transfers before switching accounts.",
+                true,
+            );
+            false
+        } else if self.demo {
+            self.toast(
+                "This demo is read-only. Run thufs tui to work with your cloud drive.",
+                false,
+            );
+            false
+        } else {
+            true
+        }
+    }
+
+    fn open_login(&mut self) {
+        let mut token = Field::new("Token", "");
+        token.secret = true;
+        self.overlay = Some(Overlay::Form(Form::new(
+            FormKind::Login,
+            "Sign in",
+            vec![token, Field::new("Account name (optional)", "")],
+        )));
+    }
+
+    fn reset_account(&mut self) {
+        self.requests.clear();
+        self.repos.clear();
+        self.entries.clear();
+        self.shares.clear();
+        self.transfers.clear();
+        self.account = None;
+        self.location = None;
+        self.cursors.clear();
+        self.selected.clear();
+        self.filter = Editor::default();
+        self.filtering = false;
+        self.connected = false;
+        self.cursor = 0;
+        self.library_cursor = 0;
+        self.share_cursor = 0;
+        self.transfer_cursor = 0;
+        self.loading = false;
+        self.repos_loading = false;
+        self.shares_loading = false;
+        self.shares_loaded = false;
+        self.load_error = None;
+        self.shares_error = None;
+        self.initial_remote = None;
+        self.session_epoch += 1;
+        self.overlay = None;
+    }
+
+    fn accept_account(&mut self, authorized: AuthorizedAccount) {
+        let language = self.language();
+        self.reset_account();
+        self.settings = authorized.settings;
+        self.settings.language = language;
+        self.signed_in = true;
+        self.account = Some(authorized.account);
+        self.requests.push(Request::UseSession {
+            epoch: self.session_epoch,
+            token: Some(authorized.token),
+        });
+        self.workspace = Workspace::Files;
+        self.focus = Focus::Files;
+        self.refresh_repos();
+        self.toast("Account switched", false);
+    }
+
+    fn settings_enter(&mut self) {
+        match self.settings_cursor {
+            0 => {
+                self.settings.language = self.settings.language.next();
+                self.requests
+                    .push(Request::SaveLanguage(self.settings.language));
+            }
+            1 => self.action(Action::Accounts),
+            2 => self.action(Action::Login),
+            3 => self.action(Action::SignOut),
+            _ => {}
+        }
     }
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {
         self.notice = Some(Notice {
@@ -594,6 +767,7 @@ impl Model {
 
     pub fn enter(&mut self) {
         match self.workspace {
+            Workspace::Settings => self.settings_enter(),
             Workspace::Files if self.focus == Focus::Libraries => self.open_library(),
             Workspace::Files => {
                 if let (Some(file), Some(location)) = (self.current_file(), self.location.as_ref())
@@ -653,6 +827,7 @@ impl Model {
 
     pub fn move_cursor(&mut self, delta: isize) {
         let (cursor, len) = match self.workspace {
+            Workspace::Settings => (&mut self.settings_cursor, 4),
             Workspace::Files if self.focus == Focus::Libraries => {
                 (&mut self.library_cursor, self.repos.len())
             }
@@ -687,7 +862,11 @@ impl Model {
             .iter()
             .position(|&i| Some(&self.shares[i].url) == share_url.as_ref())
             .unwrap_or(0);
-        if workspace == Workspace::Shares && !self.shares_loaded && !self.shares_loading {
+        if workspace == Workspace::Shares
+            && self.signed_in
+            && !self.shares_loaded
+            && !self.shares_loading
+        {
             self.refresh_shares();
         }
     }
@@ -709,14 +888,25 @@ impl Model {
     }
 
     pub fn action(&mut self, action: Action) {
-        if self.demo
+        if !self.signed_in
             && matches!(
                 action,
                 Action::Upload
+                    | Action::Refresh
                     | Action::Download
                     | Action::Share
                     | Action::Mkdir
                     | Action::NewLibrary
+                    | Action::Jump
+            )
+        {
+            self.open_login();
+            return;
+        }
+        if self.demo
+            && matches!(
+                action,
+                Action::Download | Action::Share | Action::Mkdir | Action::NewLibrary
             )
         {
             self.toast(
@@ -726,6 +916,28 @@ impl Model {
             return;
         }
         match action {
+            Action::Settings => self.switch(Workspace::Settings),
+            Action::Login => {
+                if self.can_switch_account() {
+                    self.open_login();
+                }
+            }
+            Action::Accounts => {
+                if self.can_switch_account() {
+                    self.overlay = Some(Overlay::Accounts { selected: 0 });
+                }
+            }
+            Action::SignOut => {
+                if self.signed_in && self.can_switch_account() {
+                    let id = self.id();
+                    self.auth_request = id;
+                    self.requests.push(Request::SignOut { id });
+                    self.overlay = Some(Overlay::Busy {
+                        id,
+                        form: Box::new(Form::new(FormKind::Login, "Sign out", vec![])),
+                    });
+                }
+            }
             Action::Files => self.switch(Workspace::Files),
             Action::Transfers => self.switch(Workspace::Transfers),
             Action::Shares => self.switch(Workspace::Shares),
@@ -743,6 +955,7 @@ impl Model {
                 self.cursor = 0;
             }
             Action::Refresh => match self.workspace {
+                Workspace::Settings => {}
                 Workspace::Files if self.focus == Focus::Libraries || self.location.is_none() => {
                     self.refresh_repos()
                 }
@@ -793,10 +1006,16 @@ impl Model {
                             loading: true,
                             generation: id,
                             error: None,
+                            input: Editor::default(),
+                            chosen: HashSet::new(),
+                            match_root: self.local.clone(),
+                            pattern: false,
+                            truncated: false,
                         }));
-                        self.requests.push(Request::LocalDirectory {
+                        self.requests.push(Request::MatchPaths {
                             id,
-                            path: self.local.clone(),
+                            input: String::new(),
+                            cwd: self.local.clone(),
                             hidden: false,
                         });
                     }
@@ -878,6 +1097,18 @@ impl Model {
             }
             return;
         }
+        let palette_shortcut = key.code == KeyCode::Char('p')
+            && key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+        if palette_shortcut && !matches!(self.overlay, Some(Overlay::Busy { .. })) {
+            if matches!(self.overlay, Some(Overlay::Palette { .. })) {
+                self.overlay = None;
+            } else {
+                self.open_palette();
+            }
+            return;
+        }
         if self.overlay.is_some() {
             self.overlay_key(key);
             return;
@@ -910,7 +1141,7 @@ impl Model {
             return;
         }
         match key.code {
-            KeyCode::Char('/') | KeyCode::Char(':') => self.open_palette(),
+            KeyCode::Char('4') | KeyCode::Char(',') => self.switch(Workspace::Settings),
             KeyCode::Char('?') | KeyCode::F(1) => self.action(Action::Help),
             KeyCode::Char('1') => self.switch(Workspace::Files),
             KeyCode::Char('2') => self.switch(Workspace::Transfers),
@@ -935,10 +1166,14 @@ impl Model {
                 self.parent()
             }
             KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') => self.enter(),
+            KeyCode::Left if self.workspace == Workspace::Settings && self.settings_cursor == 0 => {
+                self.settings_enter()
+            }
             KeyCode::Char('f') if self.workspace != Workspace::Transfers => {
                 self.focus = Focus::Files;
                 self.filtering = true;
             }
+            KeyCode::Esc if self.workspace == Workspace::Settings => self.switch(Workspace::Files),
             KeyCode::Esc => {
                 self.filter = Editor::default();
                 self.selected.clear();
@@ -997,6 +1232,15 @@ impl Model {
     }
 
     pub fn paste(&mut self, text: &str) {
+        if matches!(self.overlay, Some(Overlay::Picker(_))) {
+            let Some(Overlay::Picker(mut picker)) = self.overlay.take() else {
+                unreachable!()
+            };
+            picker.input.insert(text);
+            self.refresh_paths(&mut picker);
+            self.overlay = Some(Overlay::Picker(picker));
+            return;
+        }
         match self.overlay.as_mut() {
             Some(Overlay::Palette { input, selected }) => {
                 input.insert(text);
@@ -1022,6 +1266,58 @@ impl Model {
         });
     }
 
+    fn refresh_paths(&mut self, picker: &mut Picker) {
+        picker.selected = 0;
+        picker.chosen.clear();
+        picker.entries.clear();
+        picker.loading = true;
+        picker.error = None;
+        picker.generation = self.id();
+        self.requests.push(Request::MatchPaths {
+            id: picker.generation,
+            input: picker.input.text.clone(),
+            cwd: picker.cwd.clone(),
+            hidden: picker.hidden,
+        });
+    }
+
+    fn review_upload(&mut self, files: Vec<PathBuf>) {
+        let Some(location) = &self.location else {
+            return;
+        };
+        if let Some(parent) = files.first().and_then(|file| file.parent()) {
+            self.local = parent.to_path_buf();
+        }
+        let form = if files.len() == 1 {
+            let file = &files[0];
+            Form::new(
+                FormKind::Upload,
+                "Upload a file",
+                vec![
+                    Field::new("Local file", file.display().to_string()),
+                    Field::new(
+                        "Remote destination",
+                        format!(
+                            "{}/{}",
+                            location.remote().trim_end_matches('/'),
+                            file.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                    ),
+                ],
+            )
+        } else {
+            Form::new(
+                FormKind::UploadMany(files),
+                "Upload files",
+                vec![Field::new(
+                    "Remote directory",
+                    location.remote().trim_end_matches('/'),
+                )],
+            )
+        };
+        self.overlay = Some(Overlay::Form(form));
+    }
+
     fn overlay_key(&mut self, key: KeyEvent) {
         let Some(mut overlay) = self.overlay.take() else {
             return;
@@ -1030,8 +1326,31 @@ impl Model {
             return;
         }
         match &mut overlay {
+            Overlay::Accounts { selected } => {
+                let count = self.settings.accounts.len();
+                match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1).min(count),
+                    KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                    KeyCode::Enter => {
+                        if let Some(account) = self.settings.accounts.get(*selected) {
+                            let credential = Credential::Saved(account.key.clone());
+                            let id = self.id();
+                            self.auth_request = id;
+                            self.requests.push(Request::Authenticate { id, credential });
+                            self.overlay = Some(Overlay::Busy {
+                                id,
+                                form: Box::new(Form::new(FormKind::Login, "Signing in", vec![])),
+                            });
+                        } else {
+                            self.open_login();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             Overlay::Palette { input, selected } => {
-                let matches = palette_matches(&input.text);
+                let matches = palette_matches_in(&input.text, self.language());
                 match key.code {
                     KeyCode::Down => {
                         *selected = (*selected + 1).min(matches.len().saturating_sub(1))
@@ -1080,68 +1399,100 @@ impl Model {
                 }
             },
             Overlay::Picker(picker) => {
-                let mut change_dir = None;
+                let control = key.modifiers.contains(KeyModifiers::CONTROL);
+                let alt = key.modifiers.contains(KeyModifiers::ALT);
+                let mut reload = false;
                 match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Up if alt => {
+                        if let Some(parent) = picker.cwd.parent() {
+                            picker.cwd = parent.to_path_buf();
+                            picker.input = Editor::default();
+                            reload = true;
+                        }
+                    }
+                    KeyCode::Down => {
                         picker.selected =
                             (picker.selected + 1).min(picker.entries.len().saturating_sub(1))
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        picker.selected = picker.selected.saturating_sub(1)
-                    }
+                    KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
                     KeyCode::PageDown => {
                         picker.selected =
                             (picker.selected + 10).min(picker.entries.len().saturating_sub(1))
                     }
                     KeyCode::PageUp => picker.selected = picker.selected.saturating_sub(10),
-                    KeyCode::Home => picker.selected = 0,
-                    KeyCode::End => picker.selected = picker.entries.len().saturating_sub(1),
-                    KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => {
-                        change_dir = picker.cwd.parent().map(PathBuf::from)
-                    }
-                    KeyCode::Char('.') => {
+                    KeyCode::Char('.') if alt => {
                         picker.hidden = !picker.hidden;
-                        change_dir = Some(picker.cwd.clone());
+                        reload = true;
                     }
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                    KeyCode::Char('l') if control => {
+                        picker.input = Editor::default();
+                        reload = true;
+                    }
+                    KeyCode::Char('a') if control => {
+                        let files: HashSet<_> = picker
+                            .entries
+                            .iter()
+                            .filter(|e| !e.is_dir)
+                            .map(|e| e.path.clone())
+                            .collect();
+                        if files == picker.chosen {
+                            picker.chosen.clear();
+                        } else {
+                            picker.chosen = files;
+                        }
+                    }
+                    KeyCode::Char(' ') if control => {
+                        if let Some(entry) =
+                            picker.entries.get(picker.selected).filter(|e| !e.is_dir)
+                        {
+                            if !picker.chosen.remove(&entry.path) {
+                                picker.chosen.insert(entry.path.clone());
+                            }
+                            picker.selected =
+                                (picker.selected + 1).min(picker.entries.len().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Tab => {
+                        if let Some(completion) = super::paths::completion(
+                            &picker.input.text,
+                            &picker.cwd,
+                            &picker.entries,
+                            picker.selected,
+                        ) {
+                            picker.input = Editor::new(completion);
+                            reload = true;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let files: Vec<_> = picker
+                            .entries
+                            .iter()
+                            .filter(|e| !e.is_dir && picker.chosen.contains(&e.path))
+                            .map(|e| e.path.clone())
+                            .collect();
+                        if !files.is_empty() {
+                            self.review_upload(files);
+                            return;
+                        }
                         if let Some(entry) = picker.entries.get(picker.selected) {
                             if entry.is_dir {
-                                change_dir = Some(entry.path.clone());
-                            } else if let Some(location) = &self.location {
-                                self.local = picker.cwd.clone();
-                                self.overlay = Some(Overlay::Form(Form::new(
-                                    FormKind::Upload,
-                                    "Upload a file",
-                                    vec![
-                                        Field::new("Local file", entry.path.display().to_string()),
-                                        Field::new(
-                                            "Remote destination",
-                                            format!(
-                                                "{}/{}",
-                                                location.remote().trim_end_matches('/'),
-                                                entry.name
-                                            ),
-                                        ),
-                                    ],
-                                )));
+                                picker.cwd = entry.path.clone();
+                                picker.input = Editor::default();
+                                reload = true;
+                            } else {
+                                self.review_upload(vec![entry.path.clone()]);
                                 return;
                             }
                         }
                     }
-                    _ => {}
+                    _ => {
+                        if picker.input.handle(key) {
+                            reload = true;
+                        }
+                    }
                 }
-                if let Some(path) = change_dir {
-                    picker.cwd = path.clone();
-                    picker.selected = 0;
-                    picker.entries.clear();
-                    picker.loading = true;
-                    picker.error = None;
-                    picker.generation = self.id();
-                    self.requests.push(Request::LocalDirectory {
-                        id: picker.generation,
-                        path,
-                        hidden: picker.hidden,
-                    });
+                if reload {
+                    self.refresh_paths(picker);
                 }
             }
             Overlay::ShareReady(share) => {
@@ -1213,6 +1564,9 @@ impl Model {
     }
 
     fn submit(&mut self, form: Form) -> Result<(), String> {
+        if self.demo && form.is_transfer() {
+            return Err("This demo is read-only.".into());
+        }
         let value = |i: usize| form.fields[i].editor.text.trim().to_string();
         let required = |i: usize| {
             let text = value(i);
@@ -1224,6 +1578,53 @@ impl Model {
         };
         let id = self.id();
         let request = match &form.kind {
+            FormKind::UploadMany(files) => {
+                let remote = required(0)?;
+                if !remote.starts_with("repo:") {
+                    return Err("Use repo:<library>/<path> for the upload destination.".into());
+                }
+                let directory = RemoteRef::parse_list_target(remote.trim_end_matches('/'), None)
+                    .map_err(|e| e.to_string())?;
+                let mut transfers = Vec::new();
+                for local in files {
+                    if !local.is_file() {
+                        return Err(format!(
+                            "Local file is no longer available: {}",
+                            local.display()
+                        ));
+                    }
+                    let name = local
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or("The path is not valid UTF-8.")?;
+                    transfers.push(TransferSpec::Upload {
+                        local: local.clone(),
+                        remote: format!(
+                            "repo:{}{}/{}",
+                            directory.repo,
+                            normalized_path(&directory.path).trim_end_matches('/'),
+                            name
+                        ),
+                        policy: form.policy().into(),
+                    });
+                }
+                for transfer in transfers {
+                    self.enqueue(transfer);
+                }
+                return Ok(());
+            }
+            FormKind::Login => {
+                let token = form.fields[0].editor.text.trim().to_string();
+                validate_token(&token).map_err(|error| error.to_string())?;
+                self.auth_request = id;
+                Request::Authenticate {
+                    id,
+                    credential: Credential::Token {
+                        token: SecretToken::new(token),
+                        label: form.fields[1].editor.text.clone(),
+                    },
+                }
+            }
             FormKind::Jump => {
                 let remote =
                     RemoteRef::parse_list_target(&required(0)?, None).map_err(|e| e.to_string())?;
@@ -1421,6 +1822,7 @@ impl Model {
 
     fn copy_current(&mut self) {
         let text = match self.workspace {
+            Workspace::Settings => None,
             Workspace::Files => self.current_file().and_then(|f| {
                 self.location
                     .as_ref()
@@ -1439,6 +1841,54 @@ impl Model {
 
     pub fn handle_message(&mut self, message: Message) {
         match message {
+            Message::Session { epoch, message } => {
+                if epoch == self.session_epoch {
+                    self.handle_message(*message);
+                }
+            }
+            Message::Authenticated { id, result } if id == self.auth_request => {
+                let previous = self.overlay.take();
+                match result {
+                    Ok(authorized) => self.accept_account(authorized),
+                    Err(error) => {
+                        if let Some(Overlay::Busy { mut form, .. }) = previous {
+                            if !form.fields.is_empty() {
+                                form.error = Some(error.clone());
+                                self.overlay = Some(Overlay::Form(*form));
+                            } else {
+                                self.overlay = Some(Overlay::Accounts { selected: 0 });
+                            }
+                        }
+                        self.toast(error, true);
+                    }
+                }
+            }
+            Message::SignedOut { id, result } if id == self.auth_request => match result {
+                Ok(settings) => {
+                    let language = self.language();
+                    self.reset_account();
+                    self.settings = settings;
+                    self.settings.language = language;
+                    self.signed_in = false;
+                    self.workspace = Workspace::Settings;
+                    self.requests.push(Request::UseSession {
+                        epoch: self.session_epoch,
+                        token: None,
+                    });
+                    self.toast("Signed out", false);
+                }
+                Err(error) => {
+                    self.overlay = None;
+                    self.toast(error, true);
+                }
+            },
+            Message::LanguageSaved { language, result } => {
+                if let Err(error) = result {
+                    self.toast(error, true);
+                } else if language == self.language() {
+                    self.toast("Settings saved", false);
+                }
+            }
             Message::Account(Ok(account)) => self.account = Some(account),
             Message::Account(Err(error)) => {
                 self.toast(format!("Account information unavailable: {error}"), true)
@@ -1506,12 +1956,17 @@ impl Model {
                     Err(error) => self.load_error = Some(error),
                 }
             }
-            Message::LocalDirectory { id, result } => {
+            Message::PathMatches { id, result } => {
                 if let Some(Overlay::Picker(picker)) = &mut self.overlay {
                     if picker.generation == id {
                         picker.loading = false;
                         match result {
-                            Ok(entries) => picker.entries = entries,
+                            Ok(matches) => {
+                                picker.entries = matches.entries;
+                                picker.match_root = matches.root;
+                                picker.pattern = matches.pattern;
+                                picker.truncated = matches.truncated;
+                            }
                             Err(error) => picker.error = Some(error),
                         }
                     }
@@ -1645,17 +2100,44 @@ impl Model {
     }
 }
 
+#[cfg(test)]
 pub fn palette_matches(query: &str) -> Vec<usize> {
+    palette_matches_in(query, Language::English)
+}
+
+pub fn palette_matches_in(query: &str, language: Language) -> Vec<usize> {
     let query = query.trim().trim_start_matches('/');
     let mut matches: Vec<_> = COMMANDS
         .iter()
         .enumerate()
-        .filter_map(|(i, c)| {
-            fuzzy_score(&format!("{} {}", c.name, c.description), query).map(|score| (i, score))
+        .filter_map(|(index, command)| {
+            let localized = language.tr(command.name);
+            let score = [command.name, localized.as_ref()]
+                .iter()
+                .filter_map(|name| {
+                    if name.eq_ignore_ascii_case(query) {
+                        Some(0)
+                    } else {
+                        fuzzy_score(name, query).map(|score| score + 1)
+                    }
+                })
+                .min()
+                .or_else(|| {
+                    fuzzy_score(
+                        &format!(
+                            "{} {}",
+                            command.description,
+                            language.tr(command.description)
+                        ),
+                        query,
+                    )
+                    .map(|score| score + 250)
+                });
+            score.map(|score| (index, score))
         })
         .collect();
     matches.sort_by_key(|&(index, score)| (score, index));
-    matches.into_iter().map(|(i, _)| i).collect()
+    matches.into_iter().map(|(index, _)| index).collect()
 }
 
 pub fn fuzzy_score(text: &str, query: &str) -> Option<usize> {

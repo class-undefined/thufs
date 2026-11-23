@@ -105,7 +105,15 @@ impl Editor {
             .count();
         let display: Vec<&str> = graphemes
             .iter()
-            .map(|(_, s)| if secret { "•" } else { *s })
+            .map(|(_, s)| {
+                if secret {
+                    "•"
+                } else if s.chars().any(char::is_control) {
+                    "�"
+                } else {
+                    *s
+                }
+            })
             .collect();
         let mut start = 0;
         let mut cells: usize = display[..cursor]

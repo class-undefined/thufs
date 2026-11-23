@@ -102,21 +102,43 @@ impl EnvironmentOverrides {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConfigManager {
     path: PathBuf,
+    session_token: Option<Option<String>>,
+}
+
+impl std::fmt::Debug for ConfigManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigManager")
+            .field("path", &self.path)
+            .field("session_override", &self.session_token.is_some())
+            .finish()
+    }
 }
 
 impl ConfigManager {
     pub fn new() -> Self {
         Self {
             path: default_config_path(),
+            session_token: None,
         }
     }
 
     #[cfg(test)]
     pub fn from_path(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            session_token: None,
+        }
+    }
+
+    /// An explicit session override also supports signing out without changing process environment.
+    pub fn with_session_token(&self, token: Option<String>) -> Self {
+        Self {
+            path: self.path.clone(),
+            session_token: Some(token),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -146,6 +168,9 @@ impl ConfigManager {
         }
         if let Some(output) = overrides.output {
             config.output = output;
+        }
+        if let Some(token) = &self.session_token {
+            config.token = token.clone();
         }
 
         Ok((config, overrides))
@@ -262,6 +287,41 @@ mod tests {
             overrides.active_keys(),
             vec!["THUFS_TOKEN", "THUFS_DEFAULT_REPO", "THUFS_OUTPUT"]
         );
+    }
+
+    #[test]
+    fn explicit_session_token_overrides_environment_and_can_sign_out() {
+        let temp = tempdir().unwrap();
+        let manager = ConfigManager::from_path(temp.path().join("config.json"));
+        manager.set_token("file-token").unwrap();
+        let overrides = EnvironmentOverrides {
+            token: Some("environment-token".into()),
+            ..EnvironmentOverrides::default()
+        };
+        let session = manager.with_session_token(Some("session-token".into()));
+        assert_eq!(
+            session
+                .resolve_with_overrides(overrides.clone())
+                .unwrap()
+                .0
+                .token
+                .as_deref(),
+            Some("session-token")
+        );
+        assert!(
+            manager
+                .with_session_token(None)
+                .resolve_with_overrides(overrides)
+                .unwrap()
+                .0
+                .token
+                .is_none()
+        );
+        assert_eq!(
+            manager.load_file().unwrap().token.as_deref(),
+            Some("file-token")
+        );
+        assert!(!format!("{session:?}").contains("session-token"));
     }
 
     #[test]

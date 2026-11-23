@@ -13,14 +13,16 @@ use crate::transfer::format_size;
 
 use super::{
     editor::Editor,
+    i18n::Language,
     model::{
         COMMANDS, Focus, Form, FormKind, Model, Overlay, Picker, TransferStatus, Workspace,
-        palette_matches,
+        palette_matches_in,
     },
 };
 
 #[derive(Clone, Copy)]
 struct Theme {
+    language: Language,
     bg: Color,
     panel: Color,
     text: Color,
@@ -33,9 +35,10 @@ struct Theme {
 }
 
 impl Theme {
-    fn new() -> Self {
+    fn new(language: Language) -> Self {
         if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
             Self {
+                language,
                 bg: Color::Reset,
                 panel: Color::Reset,
                 text: Color::Reset,
@@ -48,6 +51,7 @@ impl Theme {
             }
         } else {
             Self {
+                language,
                 bg: Color::Rgb(16, 18, 26),
                 panel: Color::Rgb(21, 24, 34),
                 text: Color::Rgb(222, 226, 237),
@@ -94,11 +98,10 @@ pub struct HitMap {
     pub list_start: usize,
     pub library_start: usize,
     pub tabs: Vec<(Rect, Workspace)>,
-    pub command: Rect,
 }
 
 pub fn draw(frame: &mut Frame, model: &Model) -> HitMap {
-    let theme = Theme::new();
+    let theme = Theme::new(model.language());
     let area = frame.area();
     frame.render_widget(Block::default().style(theme.plain()), area);
     if area.width < 60 || area.height < 18 {
@@ -106,8 +109,16 @@ pub fn draw(frame: &mut Frame, model: &Model) -> HitMap {
             Paragraph::new(vec![
                 Line::styled("thufs", theme.accent()),
                 Line::raw(""),
-                Line::raw("This workspace needs at least 60 × 18 cells."),
-                Line::raw("Resize your terminal, or press q to quit."),
+                Line::raw(
+                    theme
+                        .language
+                        .tr("This workspace needs at least 60 × 18 cells."),
+                ),
+                Line::raw(
+                    theme
+                        .language
+                        .tr("Resize your terminal, or press q to quit."),
+                ),
             ])
             .style(theme.plain())
             .wrap(Wrap { trim: false }),
@@ -119,7 +130,7 @@ pub fn draw(frame: &mut Frame, model: &Model) -> HitMap {
     let regions = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(8),
-        Constraint::Length(if area.height < 26 { 4 } else { 5 }),
+        Constraint::Length(3),
     ])
     .split(root);
     let mut hits = HitMap::default();
@@ -128,6 +139,7 @@ pub fn draw(frame: &mut Frame, model: &Model) -> HitMap {
         Workspace::Files => files_workspace(frame, model, regions[1], theme, &mut hits),
         Workspace::Transfers => transfers(frame, model, regions[1], theme, &mut hits),
         Workspace::Shares => shares(frame, model, regions[1], theme, &mut hits),
+        Workspace::Settings => settings(frame, model, regions[1], theme, &mut hits),
     }
     footer(frame, model, regions[2], theme, &mut hits);
     if let Some(overlay) = &model.overlay {
@@ -153,12 +165,17 @@ fn header(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
                 "thufs",
                 Style::default().fg(t.text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  /  cloud workspace", t.muted()),
+            Span::styled(
+                format!("  /  {}", t.language.tr("cloud workspace")),
+                t.muted(),
+            ),
         ])),
         top[0],
     );
     let (status, color) = if model.demo {
         ("DEMO · offline", t.accent)
+    } else if !model.signed_in {
+        ("Not signed in", t.muted)
     } else if model.connected {
         ("● connected", t.mint)
     } else if model.repos_loading {
@@ -166,7 +183,10 @@ fn header(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
     } else {
         ("○ disconnected", t.red)
     };
-    let mut right = vec![Span::styled(status, Style::default().fg(color))];
+    let mut right = vec![Span::styled(
+        t.language.tr(status),
+        Style::default().fg(color),
+    )];
     if area.width >= 96 {
         right.insert(0, Span::styled("cloud.tsinghua.edu.cn  ", t.muted()));
     }
@@ -175,13 +195,15 @@ fn header(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
         top[1],
     );
     let labels = [
-        ("1  Files", Workspace::Files),
-        ("2  Transfers", Workspace::Transfers),
-        ("3  Shares", Workspace::Shares),
+        ("Files", Workspace::Files),
+        ("Transfers", Workspace::Transfers),
+        ("Shares", Workspace::Shares),
+        ("Settings", Workspace::Settings),
     ];
     let mut x = area.x + 1;
-    for (label, workspace) in labels {
-        let width = label.len() as u16 + 4;
+    for (index, (label, workspace)) in labels.into_iter().enumerate() {
+        let label = format!("{}  {}", index + 1, t.language.tr(label));
+        let width = cell_width(&label) as u16 + if area.width < 80 { 2 } else { 4 };
         let rect = Rect::new(x, area.y + 3, width, 1);
         let style = if model.workspace == workspace {
             t.selected().fg(t.accent).add_modifier(Modifier::BOLD)
@@ -195,9 +217,13 @@ fn header(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
     let active = model.active_transfers();
     if active > 0 && area.width > 95 {
         frame.render_widget(
-            Paragraph::new(format!("{} {active} active  ", spinner(model.tick)))
-                .style(Style::default().fg(t.mint))
-                .alignment(Alignment::Right),
+            Paragraph::new(format!(
+                "{} {}  ",
+                spinner(model.tick),
+                t.language.format("{0} active", &[active.to_string()])
+            ))
+            .style(Style::default().fg(t.mint))
+            .alignment(Alignment::Right),
             Rect::new(area.x + area.width - 22, area.y + 3, 22, 1),
         );
     }
@@ -234,7 +260,7 @@ fn libraries(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
     let area = area.inner(Margin::new(1, 0));
     let header = Line::from(vec![
         Span::styled(
-            "LIBRARIES",
+            t.language.tr("LIBRARIES"),
             if model.focus == Focus::Libraries {
                 t.accent()
             } else {
@@ -288,11 +314,19 @@ fn libraries(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
     }
     if model.repos_loading && model.repos.is_empty() {
         frame.render_widget(
-            Paragraph::new(format!("{} Loading libraries", spinner(model.tick))).style(t.muted()),
+            Paragraph::new(format!(
+                "{} {}",
+                spinner(model.tick),
+                t.language.tr("Loading libraries")
+            ))
+            .style(t.muted()),
             list,
         );
     } else if model.repos.is_empty() {
-        frame.render_widget(Paragraph::new("No libraries yet").style(t.muted()), list);
+        frame.render_widget(
+            Paragraph::new(t.language.tr("No libraries yet")).style(t.muted()),
+            list,
+        );
     }
     let bottom = Rect::new(
         area.x,
@@ -303,7 +337,7 @@ fn libraries(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("N", t.accent()),
-            Span::styled("  New library", t.muted()),
+            Span::styled(t.language.tr("  New library"), t.muted()),
         ])),
         Rect {
             height: 1,
@@ -340,7 +374,7 @@ fn libraries(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
             );
         } else {
             frame.render_widget(
-                Paragraph::new("Your files, in the terminal.")
+                Paragraph::new(t.language.tr("Your files, in the terminal."))
                     .style(t.muted())
                     .wrap(Wrap { trim: false }),
                 Rect::new(bottom.x, bottom.y + 5, bottom.width, 2),
@@ -349,13 +383,13 @@ fn libraries(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
     }
 }
 
-fn panel<'a>(title: impl Into<Line<'a>>, active: bool, t: Theme) -> Block<'a> {
+fn panel(title: impl Into<String>, active: bool, t: Theme) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(if active { t.accent } else { t.border }))
         .style(Style::default().bg(t.panel).fg(t.text))
-        .title(title)
+        .title(t.language.tr(&title.into()).into_owned())
         .title_style(if active { t.accent() } else { t.muted() })
 }
 
@@ -392,18 +426,22 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
     }
     let filtered = model.file_indices();
     let count = if model.filter.text.is_empty() {
-        format!("{} items", model.entries.len())
+        t.language
+            .format("{0} items", &[model.entries.len().to_string()])
     } else {
-        format!(
-            "{} of {} items · filter: {}",
-            filtered.len(),
-            model.entries.len(),
-            safe(&model.filter.text)
+        t.language.format(
+            "{0} of {1} items · filter: {2}",
+            &[
+                filtered.len().to_string(),
+                model.entries.len().to_string(),
+                safe(&model.filter.text),
+            ],
         )
     };
     if !minimal {
         frame.render_widget(
-            Paragraph::new(format!("{count}  ·  {}", model.sort.label())).style(t.muted()),
+            Paragraph::new(format!("{count}  ·  {}", t.language.tr(model.sort.label())))
+                .style(t.muted()),
             Rect::new(
                 inner.x,
                 inner.y + if compact { 1 } else { 2 },
@@ -460,8 +498,16 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
             frame,
             body,
             "◇",
-            "Your cloud workspace",
-            "Tab to choose a library, or N to create one.\nPress / to discover commands.",
+            if model.signed_in {
+                "Your cloud workspace"
+            } else {
+                "Not signed in"
+            },
+            if model.signed_in {
+                "Tab to choose a library, or N to create one.\nCtrl+P opens commands."
+            } else {
+                "Sign in to browse your cloud drive.\n4  Settings    Ctrl+P  Commands"
+            },
             t,
         );
         return;
@@ -513,7 +559,7 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
             Cell::from(file.size.map(format_size).unwrap_or_else(|| "—".into())).style(t.muted()),
         ])
     });
-    let header = Row::new(["", "NAME", "SIZE"])
+    let header = Row::new(["", "NAME", "SIZE"].map(|key| t.language.tr(key)))
         .style(t.muted())
         .bottom_margin(u16::from(!compact));
     let table = Table::new(
@@ -531,9 +577,14 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
     let mut state = TableState::default().with_selected(Some(model.cursor.saturating_sub(start)));
     frame.render_stateful_widget(table, body, &mut state);
     let foot = if model.selected.is_empty() {
-        "Space select files · a select all".into()
+        t.language
+            .tr("Space select files · a select all")
+            .into_owned()
     } else {
-        format!("{} selected · d download · Esc clear", model.selected.len())
+        t.language.format(
+            "{0} selected · d download · Esc clear",
+            &[model.selected.len().to_string()],
+        )
     };
     let summary = Layout::horizontal([Constraint::Min(10), Constraint::Length(9)]).split(
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
@@ -550,12 +601,12 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
 fn inspector(frame: &mut Frame, model: &Model, area: Rect, t: Theme) {
     let area = area.inner(Margin::new(2, 0));
     frame.render_widget(
-        Paragraph::new("INSPECTOR").style(t.muted()),
+        Paragraph::new(t.language.tr("INSPECTOR")).style(t.muted()),
         Rect { height: 1, ..area },
     );
     let Some(file) = model.current_file() else {
         frame.render_widget(
-            Paragraph::new("Select a file to see its details.")
+            Paragraph::new(t.language.tr("Select a file to see its details."))
                 .style(t.muted())
                 .wrap(Wrap { trim: true }),
             Rect::new(area.x, area.y + 3, area.width, 3),
@@ -564,12 +615,12 @@ fn inspector(frame: &mut Frame, model: &Model, area: Rect, t: Theme) {
     };
     let dir = file.kind == "dir";
     let kind = if dir {
-        "FOLDER".into()
+        t.language.tr("FOLDER").into_owned()
     } else {
         file.name
             .rsplit_once('.')
-            .map(|(_, ext)| format!("{} FILE", ext.to_uppercase()))
-            .unwrap_or_else(|| "FILE".into())
+            .map(|(_, ext)| format!("{} {}", ext.to_uppercase(), t.language.tr("FILE")))
+            .unwrap_or_else(|| t.language.tr("FILE").into_owned())
     };
     let mut lines = vec![
         Line::raw(""),
@@ -580,10 +631,10 @@ fn inspector(frame: &mut Frame, model: &Model, area: Rect, t: Theme) {
             Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
-        Line::styled("SIZE", t.muted()),
+        Line::styled(t.language.tr("SIZE"), t.muted()),
         Line::raw(file.size.map(format_size).unwrap_or_else(|| "—".into())),
         Line::raw(""),
-        Line::styled("LOCATION", t.muted()),
+        Line::styled(t.language.tr("LOCATION"), t.muted()),
         Line::raw(
             model
                 .location
@@ -593,7 +644,7 @@ fn inspector(frame: &mut Frame, model: &Model, area: Rect, t: Theme) {
         ),
         Line::styled(safe(&file.path), t.muted()),
         Line::raw(""),
-        Line::styled("ACTIONS", t.muted()),
+        Line::styled(t.language.tr("ACTIONS"), t.muted()),
     ];
     lines.push(compact_hint(
         if dir { "enter" } else { "d" },
@@ -632,11 +683,16 @@ fn transfers(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
         .count();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("{active} active"), t.accent()),
+            Span::styled(
+                t.language.format("{0} active", &[active.to_string()]),
+                t.accent(),
+            ),
             Span::styled(
                 format!(
-                    "  ·  {complete} completed  ·  {} total",
-                    model.transfers.len()
+                    "  ·  {}  ·  {}",
+                    t.language.format("{0} completed", &[complete.to_string()]),
+                    t.language
+                        .format("{0} total", &[model.transfers.len().to_string()])
                 ),
                 t.muted(),
             ),
@@ -696,14 +752,17 @@ fn transfers(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
                     safe(&transfer.spec.name()),
                     Style::default().fg(t.text).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  {}", transfer.spec.direction()), t.muted()),
+                Span::styled(
+                    format!("  {}", t.language.tr(transfer.spec.direction())),
+                    t.muted(),
+                ),
             ])),
             columns[0],
         );
         frame.render_widget(
             Paragraph::new(format!(
                 "{}  {:>3.0}% ",
-                transfer.status.label(),
+                t.language.tr(transfer.status.label()),
                 transfer.ratio() * 100.0
             ))
             .style(Style::default().fg(color))
@@ -766,7 +825,8 @@ fn transfers(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
     }
     frame.render_widget(
         Paragraph::new(
-            "x cancel  ·  r retry failed/cancelled  ·  enter details  ·  C clear finished",
+            t.language
+                .tr("x cancel  ·  r retry failed/cancelled  ·  enter details  ·  C clear finished"),
         )
         .style(t.muted()),
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
@@ -784,8 +844,15 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
     frame.render_widget(block, area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Shared from your drive", t.accent()),
-            Span::styled(format!("  ·  {} links", model.shares.len()), t.muted()),
+            Span::styled(t.language.tr("Shared from your drive"), t.accent()),
+            Span::styled(
+                format!(
+                    "  ·  {}",
+                    t.language
+                        .format("{0} links", &[model.shares.len().to_string()])
+                ),
+                t.muted(),
+            ),
         ])),
         Rect {
             y: inner.y + 1,
@@ -861,7 +928,14 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
                     .unwrap_or_else(|| "—".into()),
             )
             .style(t.muted()),
-            Cell::from(safe(share.expire_date.as_deref().unwrap_or("No expiry"))).style(t.muted()),
+            Cell::from(
+                share
+                    .expire_date
+                    .as_deref()
+                    .map(safe)
+                    .unwrap_or_else(|| t.language.tr("No expiry").into_owned()),
+            )
+            .style(t.muted()),
         ])
         .height(2)
     });
@@ -882,7 +956,7 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
     };
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["FILE / LINK", "LIBRARY", "VIEWS", "EXPIRES"])
+            Row::new(["FILE / LINK", "LIBRARY", "VIEWS", "EXPIRES"].map(|key| t.language.tr(key)))
                 .style(t.muted())
                 .bottom_margin(1),
         )
@@ -895,107 +969,95 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
         &mut TableState::default().with_selected(Some(model.share_cursor.saturating_sub(start))),
     );
     frame.render_widget(
-        Paragraph::new("y copy link  ·  enter details  ·  x revoke  ·  f filter  ·  r refresh")
-            .style(t.muted()),
+        Paragraph::new(
+            t.language
+                .tr("y copy link  ·  enter details  ·  x revoke  ·  f filter  ·  r refresh"),
+        )
+        .style(t.muted()),
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
     );
 }
 
-fn footer(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitMap) {
-    let compact = area.height < 5;
+fn footer(frame: &mut Frame, model: &Model, area: Rect, t: Theme, _hits: &mut HitMap) {
     let notice = model
         .notice
         .as_ref()
         .filter(|n| n.since.elapsed().as_secs() < 9);
-    let (text, color) = if let Some(notice) = notice {
-        (
-            format!(
-                " {} {}",
-                if notice.error { "!" } else { "✓" },
-                safe(&notice.text)
-            ),
-            if notice.error { t.red } else { t.mint },
+    let text = if let Some(notice) = notice {
+        format!(
+            "{} {}",
+            if notice.error { "!" } else { "✓" },
+            t.language.message(&safe(&notice.text))
         )
     } else if model.quitting {
-        (" Cancelling active transfers before exit…".into(), t.muted)
-    } else if model.active_transfers() > 0 {
-        (
-            format!(
-                " {} {} transfer(s) active · press 2 to view progress",
-                spinner(model.tick),
-                model.active_transfers()
-            ),
-            t.mint,
-        )
+        t.language
+            .tr("Cancelling active transfers before exit…")
+            .into_owned()
     } else if model.demo {
-        (
-            " Offline demo · explore freely · cloud operations are disabled".into(),
-            t.muted,
-        )
+        t.language
+            .tr("Offline demo · cloud operations are disabled")
+            .into_owned()
     } else {
-        (
-            format!(" Local  {}", safe(&model.local.display().to_string())),
-            t.muted,
+        format!(
+            "{}  {}",
+            t.language.tr("Local"),
+            safe(&model.local.display().to_string())
         )
     };
-    if !compact {
-        frame.render_widget(
-            Paragraph::new(text.clone()).style(Style::default().fg(color)),
-            Rect { height: 1, ..area },
-        );
-    }
-    let command = Rect::new(area.x, area.y + u16::from(!compact), area.width, 3);
-    hits.command = command;
-    let block = panel("", model.filtering, t);
-    let inner = block.inner(command).inner(Margin::new(1, 0));
-    frame.render_widget(block, command);
-    if model.filtering {
-        let prefix = "find › ";
-        frame.render_widget(Paragraph::new(prefix).style(t.accent()), inner);
-        let prefix_width = cell_width(prefix) as u16;
-        let input_area = Rect::new(
-            inner.x + prefix_width,
-            inner.y,
-            inner.width.saturating_sub(prefix_width),
-            1,
-        );
-        editor(frame, &model.filter, input_area, false, t);
+    let color = if notice.is_some_and(|n| n.error) {
+        t.red
+    } else if notice.is_some() {
+        t.mint
     } else {
-        let mut spans = vec![
-            Span::styled("❯  ", t.accent()),
-            Span::styled("/", Style::default().fg(t.text)),
-            Span::styled(" for commands", t.muted()),
-        ];
-        if !model.filter.text.is_empty() {
-            spans.push(Span::styled(
-                format!("    filter: {}  ·  Esc clears", safe(&model.filter.text)),
-                Style::default().fg(t.mint),
-            ));
-        }
-        let columns = Layout::horizontal([
-            Constraint::Min(20),
-            Constraint::Length(if inner.width > 82 { 24 } else { 0 }),
-        ])
-        .split(inner);
-        frame.render_widget(Paragraph::new(Line::from(spans)), columns[0]);
-        if inner.width > 82 {
-            frame.render_widget(
-                Paragraph::new("Ctrl P  command palette")
-                    .style(t.muted())
-                    .alignment(Alignment::Right),
-                columns[1],
-            );
-        }
+        t.muted
+    };
+    let columns = Layout::horizontal([
+        Constraint::Min(10),
+        Constraint::Length(if area.width >= 90 { 32 } else { 22 }),
+    ])
+    .split(Rect { height: 1, ..area });
+    if model.filtering {
+        let prefix = format!("{} › ", t.language.tr("Find"));
+        let width = cell_width(&prefix) as u16;
+        frame.render_widget(Paragraph::new(prefix).style(t.accent()), columns[0]);
+        editor(
+            frame,
+            &model.filter,
+            Rect::new(
+                columns[0].x + width,
+                columns[0].y,
+                columns[0].width.saturating_sub(width),
+                1,
+            ),
+            false,
+            t,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(text).style(Style::default().fg(color)),
+            columns[0],
+        );
     }
+    let shortcut = if cfg!(target_os = "macos") {
+        "Ctrl/⌘+P"
+    } else {
+        "Ctrl+P"
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{shortcut}  {}", t.language.tr("Commands")))
+            .style(t.muted())
+            .alignment(Alignment::Right),
+        columns[1],
+    );
     let hints = match model.workspace {
         Workspace::Files if model.focus == Focus::Libraries => {
-            "↑↓ navigate   enter open library   tab files   N new library   ? help   q quit"
+            "↑↓ navigate   enter open library   tab files   N new library   4 settings   ? help   q quit"
         }
         Workspace::Files => {
             if area.width >= 100 {
-                "↑↓ navigate   enter open   tab libraries   u upload   d download   s share   f find   ? help   q quit"
+                "↑↓ navigate   enter open   tab libraries   u upload   d download   s share   f find   4 settings   ? help"
             } else {
-                "↑↓ move  enter open  tab libraries  u upload  d download  ? help"
+                "↑↓ move  enter open  tab libraries  u upload  4 settings  ? help"
             }
         }
         Workspace::Transfers => {
@@ -1004,20 +1066,92 @@ fn footer(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
         Workspace::Shares => {
             "↑↓ navigate   y copy   x revoke   f find   r refresh   1 files   ? help   q quit"
         }
+        Workspace::Settings => {
+            "↑↓ navigate   enter change   ←→ language   1 files   esc back   q quit"
+        }
     };
     frame.render_widget(
-        Paragraph::new(if compact && notice.is_some() {
-            text
-        } else {
-            format!(" {hints}")
-        })
-        .style(if compact && notice.is_some() {
-            Style::default().fg(color)
-        } else {
-            t.muted()
-        }),
-        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        Paragraph::new(t.language.tr(hints)).style(t.muted()),
+        Rect::new(area.x, area.y + 1, area.width, 1),
     );
+}
+
+fn settings(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitMap) {
+    let block = panel(" SETTINGS ", true, t);
+    let inner = block.inner(area).inner(Margin::new(2, 1));
+    frame.render_widget(block, area);
+    let compact = inner.height < 12;
+    frame.render_widget(
+        Paragraph::new(t.language.tr("Language and account settings")).style(t.accent()),
+        Rect { height: 1, ..inner },
+    );
+    let account = model
+        .account
+        .as_ref()
+        .map(|a| format!("{} · {}", a.name.as_deref().unwrap_or(&a.email), a.email))
+        .unwrap_or_else(|| t.language.tr("Not signed in").into_owned());
+    frame.render_widget(
+        Paragraph::new(safe(&account)).style(t.muted()),
+        Rect::new(
+            inner.x,
+            inner.y + if compact { 1 } else { 2 },
+            inner.width,
+            1,
+        ),
+    );
+    let header = if compact { 2 } else { 4 };
+    let row_height = if compact { 1 } else { 2 };
+    let body = Rect::new(
+        inner.x,
+        inner.y + header,
+        inner.width,
+        inner.height.saturating_sub(header),
+    );
+    hits.files = body;
+    hits.row_height = row_height;
+    let visible = (body.height / row_height) as usize;
+    let start = scroll_start(model.settings_cursor, visible, 4);
+    hits.list_start = start;
+    for (index, (label, value)) in [
+        ("Language", model.language().label().to_string()),
+        ("Switch account", model.settings.accounts.len().to_string()),
+        (
+            if model.signed_in {
+                "Add account"
+            } else {
+                "Sign in with token"
+            },
+            String::new(),
+        ),
+        ("Sign out", String::new()),
+    ]
+    .into_iter()
+    .enumerate()
+    .skip(start)
+    .take(visible)
+    {
+        let row = Rect::new(
+            body.x,
+            body.y + (index - start) as u16 * row_height,
+            body.width,
+            1,
+        );
+        let selected = index == model.settings_cursor;
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} {}    {}",
+                if selected { "›" } else { " " },
+                t.language.tr(label),
+                value
+            ))
+            .style(if selected {
+                t.selected()
+            } else {
+                Style::default().fg(t.text)
+            }),
+            row,
+        );
+    }
 }
 
 fn empty(frame: &mut Frame, area: Rect, symbol: &str, title: &str, description: &str, t: Theme) {
@@ -1032,7 +1166,7 @@ fn empty(frame: &mut Frame, area: Rect, symbol: &str, title: &str, description: 
         Line::styled(symbol.to_string(), t.accent()),
         Line::raw(""),
         Line::styled(
-            title.to_string(),
+            t.language.tr(title).into_owned(),
             Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
@@ -1040,7 +1174,7 @@ fn empty(frame: &mut Frame, area: Rect, symbol: &str, title: &str, description: 
     lines.extend(
         description
             .lines()
-            .map(|line| Line::styled(line.to_string(), t.muted())),
+            .map(|line| Line::styled(t.language.tr(line).into_owned(), t.muted())),
     );
     frame.render_widget(
         Paragraph::new(lines)
@@ -1052,13 +1186,78 @@ fn empty(frame: &mut Frame, area: Rect, symbol: &str, title: &str, description: 
 
 fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
     match overlay {
+        Overlay::Accounts { selected } => {
+            let area = popup(
+                frame,
+                76,
+                (model.settings.accounts.len() as u16 * 2 + 8).min(26),
+                " SAVED ACCOUNTS ",
+                t,
+                false,
+            );
+            let inner = area.inner(Margin::new(2, 1));
+            let visible = inner.height.saturating_sub(3) as usize / 2;
+            let start = scroll_start(*selected, visible, model.settings.accounts.len() + 1);
+            for (row, index) in (start..model.settings.accounts.len() + 1)
+                .take(visible)
+                .enumerate()
+            {
+                let (name, detail) = model
+                    .settings
+                    .accounts
+                    .get(index)
+                    .map(|account| {
+                        (
+                            if account.key.starts_with('@') {
+                                t.language.tr(&account.label).into_owned()
+                            } else {
+                                safe(&account.label)
+                            },
+                            format!(
+                                "{}{}",
+                                if model.settings.active_account.as_ref() == Some(&account.key) {
+                                    "● "
+                                } else {
+                                    ""
+                                },
+                                account.detail
+                            ),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (format!("+ {}", t.language.tr("Add account")), String::new())
+                    });
+                let y = inner.y + row as u16 * 2;
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "{} {name}",
+                        if index == *selected { "›" } else { " " }
+                    ))
+                    .style(if index == *selected {
+                        t.selected()
+                    } else {
+                        Style::default().fg(t.text)
+                    }),
+                    Rect::new(inner.x, y, inner.width, 1),
+                );
+                frame.render_widget(
+                    Paragraph::new(safe(&detail)).style(t.muted()),
+                    Rect::new(inner.x + 2, y + 1, inner.width.saturating_sub(2), 1),
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(t.language.tr("↑↓ choose   enter switch   esc close"))
+                    .style(t.muted()),
+                Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
+            );
+        }
         Overlay::Palette { input, selected } => {
-            let matches = palette_matches(&input.text);
+            let matches = palette_matches_in(&input.text, model.language());
             let rows = matches.len().min(8);
             let area = popup(frame, 84, rows as u16 + 7, " COMMANDS ", t, true);
             let inner = area.inner(Margin::new(2, 1));
             frame.render_widget(
-                Paragraph::new("Find an action").style(t.muted()),
+                Paragraph::new(t.language.tr("Find an action")).style(t.muted()),
                 Rect { height: 1, ..inner },
             );
             frame.render_widget(
@@ -1077,8 +1276,8 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
             let data = matches.iter().skip(start).take(rows).map(|&i| {
                 let cmd = &COMMANDS[i];
                 Row::new([
-                    Cell::from(cmd.name).style(t.accent()),
-                    Cell::from(cmd.description).style(t.muted()),
+                    Cell::from(t.language.tr(cmd.name)).style(t.accent()),
+                    Cell::from(t.language.tr(cmd.description)).style(t.muted()),
                     Cell::from(cmd.key).style(t.muted()),
                 ])
             });
@@ -1100,12 +1299,16 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
             );
             if matches.is_empty() {
                 frame.render_widget(
-                    Paragraph::new("No matching commands").style(t.muted()),
+                    Paragraph::new(t.language.tr("No matching commands")).style(t.muted()),
                     menu,
                 );
             }
             frame.render_widget(
-                Paragraph::new("↑↓ choose   enter run   tab complete   esc close").style(t.muted()),
+                Paragraph::new(
+                    t.language
+                        .tr("↑↓ choose   enter run   tab complete   esc close"),
+                )
+                .style(t.muted()),
                 Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
             );
         }
@@ -1116,11 +1319,11 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
             frame.render_widget(
                 Paragraph::new(vec![
                     Line::styled(
-                        format!("{} {}", spinner(model.tick), form.title),
+                        format!("{} {}", spinner(model.tick), t.language.tr(form.title)),
                         t.accent(),
                     ),
                     Line::raw(""),
-                    Line::styled("Waiting for the cloud drive…", t.muted()),
+                    Line::styled(t.language.tr("Waiting for the cloud drive…"), t.muted()),
                 ])
                 .wrap(Wrap { trim: false }),
                 area.inner(Margin::new(3, 2)),
@@ -1130,7 +1333,7 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
             let area = popup(frame, 80, 14, " SHARE LINK READY ", t, false);
             let lines = vec![
                 Line::styled(
-                    "↗  Ready to share",
+                    t.language.tr("↗  Ready to share"),
                     Style::default().fg(t.mint).add_modifier(Modifier::BOLD),
                 ),
                 Line::raw(""),
@@ -1140,15 +1343,15 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
                 Line::raw(""),
                 Line::raw(format!(
                     "{}  ·  {}",
-                    if share.password_protected {
+                    t.language.tr(if share.password_protected {
                         "Password protected"
                     } else {
                         "No password"
-                    },
+                    }),
                     share
                         .expires_in_days
-                        .map(|d| format!("Expires in {d} days"))
-                        .unwrap_or_else(|| "No expiry".into())
+                        .map(|d| t.language.format("Expires in {0} days", &[d.to_string()]))
+                        .unwrap_or_else(|| t.language.tr("No expiry").into_owned())
                 )),
                 Line::raw(""),
                 hint("y / enter", "Copy link to clipboard", t),
@@ -1165,15 +1368,13 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
             let area = popup(frame, 70, 11, " REVOKE SHARE LINK ", t, false);
             frame.render_widget(
                 Paragraph::new(vec![
-                    Line::styled(
-                        "Revoke this link?",
+                    Line::styled(t.language.tr("Revoke this link?"),
                         Style::default().fg(t.red).add_modifier(Modifier::BOLD),
                     ),
                     Line::raw(""),
                     Line::raw(safe(path)),
                     Line::raw(""),
-                    Line::styled(
-                        "People using this link will lose access. Your file stays in the drive.",
+                    Line::styled(t.language.tr("People using this link will lose access. Your file stays in the drive."),
                         t.muted(),
                     ),
                     Line::raw(""),
@@ -1189,12 +1390,18 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
             frame.render_widget(
                 Paragraph::new(vec![
                     Line::styled(
-                        format!("{} active transfer(s)", model.active_transfers()),
+                        t.language.format(
+                            "{0} active transfer(s)",
+                            &[model.active_transfers().to_string()],
+                        ),
                         t.accent(),
                     ),
                     Line::raw(""),
-                    Line::raw("Quit and cancel the remaining transfers?"),
-                    Line::styled("Partial downloads can resume when retried.", t.muted()),
+                    Line::raw(t.language.tr("Quit and cancel the remaining transfers?")),
+                    Line::styled(
+                        t.language.tr("Partial downloads can resume when retried."),
+                        t.muted(),
+                    ),
                     Line::raw(""),
                     hint("enter", "Cancel transfers and quit", t),
                     hint("esc", "Keep working", t),
@@ -1206,9 +1413,13 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
         Overlay::Details { title, lines } => {
             let area = popup(frame, 84, 16, " DETAILS ", t, false);
             let mut text = vec![Line::styled(safe(title), t.accent()), Line::raw("")];
-            text.extend(lines.iter().map(|s| Line::raw(safe(s))));
+            text.extend(
+                lines
+                    .iter()
+                    .map(|s| Line::raw(t.language.message(&safe(s)))),
+            );
             text.push(Line::raw(""));
-            text.push(Line::styled("esc / enter  Close", t.muted()));
+            text.push(Line::styled(t.language.tr("esc / enter  Close"), t.muted()));
             frame.render_widget(
                 Paragraph::new(text)
                     .style(Style::default().fg(t.text))
@@ -1219,10 +1430,10 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
         Overlay::Help { scroll } => {
             let area = popup(frame, 88, 24, " MAKE YOURSELF AT HOME ", t, false);
             let lines = vec![
-                Line::styled("Your cloud drive. One keyboard.", t.accent()),
+                Line::styled(t.language.tr("Your cloud drive. One keyboard."), t.accent()),
                 Line::raw(""),
-                hint("1 / 2 / 3", "Files / Transfers / Shares", t),
-                hint("/ · Ctrl P", "Search commands; Tab completes", t),
+                hint("1 / 2 / 3 / 4", "Files / Transfers / Shares / Settings", t),
+                hint("Ctrl/⌘ P", "Search commands; Tab completes", t),
                 hint("↑↓ · j k", "Move selection; PgUp/PgDn page", t),
                 hint("enter · l", "Open library, folder, or details", t),
                 hint("← · h · ⌫", "Parent folder; at root: libraries", t),
@@ -1239,11 +1450,14 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
                 hint("esc / q", "Close overlay / quit workspace", t),
                 Line::raw(""),
                 Line::styled(
-                    "Default conflict policy: uniquify. Folder transfers are not supported.",
+                    t.language.tr(
+                        "Default conflict policy: uniquify. Folder transfers are not supported.",
+                    ),
                     t.muted(),
                 ),
                 Line::styled(
-                    "Mouse: click to select, double-click to open, wheel to scroll.",
+                    t.language
+                        .tr("Mouse: click to select, double-click to open, wheel to scroll."),
                     t.muted(),
                 ),
             ];
@@ -1259,7 +1473,7 @@ fn draw_overlay(frame: &mut Frame, model: &Model, overlay: &Overlay, t: Theme) {
                 },
             );
             frame.render_widget(
-                Paragraph::new("↑↓ scroll   esc close").style(t.muted()),
+                Paragraph::new(t.language.tr("↑↓ scroll   esc close")).style(t.muted()),
                 Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
             );
         }
@@ -1278,18 +1492,26 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
     );
     let inner = area.inner(Margin::new(3, 1));
     let subtitle = match &form.kind {
+        FormKind::UploadMany(files) => t.language.format(
+            "{0} file(s) will be added to your transfer queue.",
+            &[files.len().to_string()],
+        ),
+        FormKind::Login => t
+            .language
+            .tr("Paste a cloud drive API token. It will be saved privately on this device.")
+            .into_owned(),
         FormKind::Share(remote) => safe(remote),
         FormKind::Upload => "Choose the destination and conflict policy before uploading.".into(),
-        FormKind::Download(remotes) => format!(
-            "{} file(s) will be added to your transfer queue.",
-            remotes.len()
+        FormKind::Download(remotes) => t.language.format(
+            "{0} file(s) will be added to your transfer queue.",
+            &[remotes.len().to_string()],
         ),
         FormKind::Jump => "Library name or repo:<library>/<directory>".into(),
         FormKind::Mkdir => "Creates a folder inside the current directory.".into(),
         FormKind::NewLibrary => "A new home for a collection of files.".into(),
     };
     frame.render_widget(
-        Paragraph::new(subtitle).style(t.muted()),
+        Paragraph::new(t.language.tr(&subtitle).into_owned()).style(t.muted()),
         Rect { height: 1, ..inner },
     );
     for (index, field) in form.fields.iter().enumerate() {
@@ -1299,7 +1521,11 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
         }
         let active = form.active == index;
         frame.render_widget(
-            Paragraph::new(field.label).style(if active { t.accent() } else { t.muted() }),
+            Paragraph::new(t.language.tr(field.label)).style(if active {
+                t.accent()
+            } else {
+                t.muted()
+            }),
             Rect::new(inner.x, y, inner.width, 1),
         );
         let input = Rect::new(inner.x, y + 1, inner.width, 1);
@@ -1321,13 +1547,34 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
         }
     }
     let bottom = area.bottom().saturating_sub(4);
+    if matches!(form.kind, FormKind::Login) {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}: https://cloud.tsinghua.edu.cn/profile/#get-auth-token",
+                t.language.tr("Get token")
+            ))
+            .style(t.muted())
+            .wrap(Wrap { trim: false }),
+            Rect::new(inner.x, inner.y + 8, inner.width, 2),
+        );
+    }
     if form.is_transfer() {
         let y = inner.y + 2 + form.fields.len() as u16 * 3;
         if y < bottom {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(format!("Conflict: {}", form.policy()), t.accent()),
-                    Span::styled("  ·  Ctrl O changes", t.muted()),
+                    Span::styled(
+                        format!(
+                            "{}: {}",
+                            t.language.tr("Conflict"),
+                            t.language.tr(form.policy())
+                        ),
+                        t.accent(),
+                    ),
+                    Span::styled(
+                        format!("  ·  {}", t.language.tr("Ctrl O changes")),
+                        t.muted(),
+                    ),
                 ])),
                 Rect::new(inner.x, y, inner.width, 1),
             );
@@ -1335,44 +1582,93 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme) {
     }
     if let Some(error) = &form.error {
         frame.render_widget(
-            Paragraph::new(safe(error))
+            Paragraph::new(t.language.message(&safe(error)))
                 .style(Style::default().fg(t.red))
                 .wrap(Wrap { trim: false }),
             Rect::new(inner.x, bottom, inner.width, 2),
         );
     }
     frame.render_widget(
-        Paragraph::new("tab next field   enter confirm   esc cancel").style(t.muted()),
+        Paragraph::new(t.language.tr("tab next field   enter confirm   esc cancel"))
+            .style(t.muted()),
         Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
     );
 }
 
 fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
-    let area = popup(frame, 92, 26, " UPLOAD · CHOOSE A LOCAL FILE ", t, false);
+    let area = popup(frame, 96, 27, " UPLOAD · CHOOSE A LOCAL FILE ", t, false);
     let inner = area.inner(Margin::new(2, 1));
     frame.render_widget(
-        Paragraph::new(safe(&picker.cwd.display().to_string())).style(t.accent()),
+        Paragraph::new(format!(
+            "{}  {}",
+            t.language.tr("Path"),
+            safe(&picker.cwd.display().to_string())
+        ))
+        .style(t.muted()),
         Rect { height: 1, ..inner },
     );
+    let input_area = Rect::new(inner.x + 2, inner.y + 2, inner.width.saturating_sub(3), 1);
     frame.render_widget(
-        Paragraph::new("Folders open with Enter. Select a file to review its upload destination.")
+        Block::default().style(t.selected()),
+        Rect::new(inner.x, input_area.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("› ").style(t.accent()),
+        Rect::new(inner.x, input_area.y, 2, 1),
+    );
+    if picker.input.text.is_empty() {
+        frame.render_widget(
+            Paragraph::new(
+                t.language.tr(
+                    "Type a path, file name, or pattern. Tab completes; Enter opens or selects.",
+                ),
+            )
             .style(t.muted()),
-        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            input_area,
+        );
+    } else {
+        editor(frame, &picker.input, input_area, false, t);
+    }
+    let count = if picker.chosen.is_empty() {
+        t.language
+            .format("{0} items", &[picker.entries.len().to_string()])
+    } else {
+        t.language
+            .format("{0} files selected", &[picker.chosen.len().to_string()])
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{} · {}{}",
+            t.language.tr("Matching paths"),
+            count,
+            if picker.truncated {
+                t.language.tr(" · first 2000 matches").into_owned()
+            } else {
+                String::new()
+            }
+        ))
+        .style(t.muted()),
+        Rect::new(inner.x, inner.y + 4, inner.width, 1),
     );
     let body = Rect::new(
         inner.x,
-        inner.y + 3,
+        inner.y + 6,
         inner.width,
-        inner.height.saturating_sub(6),
+        inner.height.saturating_sub(9),
     );
     if picker.loading {
         frame.render_widget(
-            Paragraph::new(format!("{} Loading local files", spinner(model.tick))).style(t.muted()),
+            Paragraph::new(format!(
+                "{} {}",
+                spinner(model.tick),
+                t.language.tr("Loading local files")
+            ))
+            .style(t.muted()),
             body,
         );
     } else if let Some(error) = &picker.error {
         frame.render_widget(
-            Paragraph::new(safe(error))
+            Paragraph::new(t.language.message(&safe(error)))
                 .style(Style::default().fg(t.red))
                 .wrap(Wrap { trim: false }),
             body,
@@ -1396,12 +1692,24 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
             } else {
                 Style::default()
             };
+            let display = entry
+                .path
+                .strip_prefix(&picker.match_root)
+                .unwrap_or(&entry.path)
+                .display()
+                .to_string();
+            let marker = if picker.chosen.contains(&entry.path) {
+                "●"
+            } else if entry.is_dir {
+                "▸"
+            } else {
+                "·"
+            };
             frame.render_widget(
                 Paragraph::new(format!(
-                    "{} {} {}",
+                    "{} {marker} {}",
                     if selected { "›" } else { " " },
-                    if entry.is_dir { "▸" } else { "·" },
-                    safe(&entry.name)
+                    safe(&display)
                 ))
                 .style(style.fg(if entry.is_dir { t.accent } else { t.text })),
                 columns[0],
@@ -1410,20 +1718,30 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme) {
         }
         if picker.entries.is_empty() {
             frame.render_widget(
-                Paragraph::new("No files in this folder. Press . to show hidden files.")
-                    .style(t.muted()),
+                Paragraph::new(t.language.tr("No matching paths")).style(t.muted()),
                 body,
             );
         }
     }
     frame.render_widget(
-        Paragraph::new(format!(
-            "↑↓ move   enter choose   h parent   . hidden ({})   esc cancel",
-            if picker.hidden { "shown" } else { "hidden" }
-        ))
+        Paragraph::new(
+            t.language
+                .tr("↑↓ select  tab complete  enter choose  ctrl+a all matches  esc cancel"),
+        )
+        .style(t.muted()),
+        Rect::new(inner.x, area.bottom().saturating_sub(3), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(
+            t.language
+                .tr("Ctrl+L clear path · Alt+↑ parent · Alt+. hidden · Ctrl+Space select"),
+        )
         .style(t.muted()),
         Rect::new(inner.x, area.bottom().saturating_sub(2), inner.width, 1),
     );
+    // The path field remains the input target while arrows move through matches.
+    let (_, cursor) = picker.input.viewport(input_area.width as usize, false);
+    frame.set_cursor_position((input_area.x + cursor, input_area.y));
 }
 
 fn popup(frame: &mut Frame, width: u16, height: u16, title: &str, t: Theme, bottom: bool) -> Rect {
@@ -1470,14 +1788,20 @@ fn editor(frame: &mut Frame, input: &Editor, area: Rect, secret: bool, t: Theme)
 fn hint(key: &str, description: &str, t: Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{key:<12}"), t.accent()),
-        Span::styled(description.to_string(), Style::default().fg(t.text)),
+        Span::styled(
+            t.language.tr(description).into_owned(),
+            Style::default().fg(t.text),
+        ),
     ])
 }
 
 fn compact_hint(key: &str, description: &str, t: Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{key:<7}"), t.accent()),
-        Span::styled(description.to_string(), Style::default().fg(t.text)),
+        Span::styled(
+            t.language.tr(description).into_owned(),
+            Style::default().fg(t.text),
+        ),
     ])
 }
 

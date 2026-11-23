@@ -9,6 +9,17 @@ use super::backend::{Message, Request};
 /// An explicit offline fixture. No cloud requests or filesystem writes are allowed here.
 pub fn respond(request: Request) -> Message {
     match request {
+        Request::UseSession { .. } | Request::SaveLanguage(_) => {
+            unreachable!("settings are dispatched separately")
+        }
+        Request::Authenticate { id, .. } => Message::Authenticated {
+            id,
+            result: Err("Demo is read-only".into()),
+        },
+        Request::SignOut { id } => Message::SignedOut {
+            id,
+            result: Err("Demo is read-only".into()),
+        },
         Request::Account => Message::Account(Ok(AccountInfoResult {
             login_id: None,
             name: Some("Demo workspace".into()),
@@ -62,9 +73,14 @@ pub fn respond(request: Request) -> Message {
             result: Err("Demo is read-only".into()),
         },
         Request::Copy(text) => super::backend::execute(Request::Copy(text)),
-        Request::LocalDirectory { id, .. } => Message::LocalDirectory {
+        Request::MatchPaths {
             id,
-            result: Err("Demo is read-only".into()),
+            input,
+            cwd,
+            hidden,
+        } => Message::PathMatches {
+            id,
+            result: super::paths::matches(&input, &cwd, hidden).map_err(|e| e.to_string()),
         },
         Request::Transfer { .. } | Request::CancelTransfer { .. } => {
             unreachable!("transfers are guarded by the backend")

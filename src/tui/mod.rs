@@ -1,7 +1,10 @@
 mod backend;
 mod demo;
 mod editor;
+mod i18n;
 mod model;
+mod paths;
+mod settings;
 mod ui;
 
 #[cfg(test)]
@@ -15,6 +18,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+#[cfg(not(windows))]
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -57,16 +64,22 @@ pub fn run(options: Options) -> Result<()> {
     if !local.is_dir() {
         bail!("--local must point to an existing directory");
     }
+    let config = ConfigManager::new();
+    let store = if options.demo {
+        settings::SettingsStore::ephemeral()
+    } else {
+        settings::SettingsStore::open(&config)?
+    };
+    let initial_token = store.initial_token();
+    let view = store.view();
     let initial_remote = if options.demo {
         options.remote
     } else {
-        let config = ConfigManager::new().load_resolved()?;
-        if config.token.as_ref().is_none_or(|t| t.trim().is_empty()) {
-            bail!("no token configured; set THUFS_TOKEN or run thufs auth set-token <token>");
-        }
+        let config = config.load_resolved()?;
         options.remote.or(config.default_repo)
     };
     let mut model = Model::new(local, initial_remote, options.demo);
+    model.configure_settings(view, initial_token.is_some());
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore();
@@ -76,7 +89,7 @@ pub fn run(options: Options) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
         .context("Cannot initialize terminal renderer")?;
     let (sender, receiver) = mpsc::channel();
-    let mut backend = Backend::new(sender, options.demo);
+    let mut backend = Backend::with_settings(sender, options.demo, store, initial_token);
     let mut last_click: Option<(Instant, u16, u16)> = None;
     while !model.should_quit {
         for request in std::mem::take(&mut model.requests) {
@@ -121,6 +134,11 @@ impl Session {
             EnableBracketedPaste,
             Hide
         )?;
+        #[cfg(not(windows))]
+        execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
         if mouse {
             execute!(io::stdout(), EnableMouseCapture)?;
         }
@@ -134,6 +152,8 @@ impl Drop for Session {
 }
 
 fn restore() {
+    #[cfg(not(windows))]
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(
         io::stdout(),
         ResetColor,
@@ -178,10 +198,6 @@ fn handle_mouse(
                     return;
                 }
             }
-            if hits.command.contains(point) {
-                model.open_palette();
-                return;
-            }
             if hits.libraries.contains(point) {
                 model.focus = Focus::Libraries;
                 model.library_cursor = (hits.library_start
@@ -198,6 +214,7 @@ fn handle_mouse(
                 let index = hits.list_start + ((row - hits.file_header) / hits.row_height) as usize;
                 model.focus = Focus::Files;
                 match model.workspace {
+                    Workspace::Settings => model.settings_cursor = index.min(3),
                     Workspace::Files => {
                         model.cursor = index.min(model.file_indices().len().saturating_sub(1))
                     }

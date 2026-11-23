@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::Sender,
     },
@@ -27,9 +27,27 @@ use crate::{
 };
 
 use super::model::{LocalEntry, Location, TransferSpec};
+use super::{
+    i18n::Language,
+    settings::{
+        AuthorizedAccount, Credential, SecretToken, SettingsStore, SettingsView, validate_token,
+    },
+};
 
 // Deliberately not Debug: requests can contain a share password.
 pub enum Request {
+    UseSession {
+        epoch: u64,
+        token: Option<SecretToken>,
+    },
+    Authenticate {
+        id: u64,
+        credential: Credential,
+    },
+    SaveLanguage(Language),
+    SignOut {
+        id: u64,
+    },
     Account,
     Repositories {
         id: u64,
@@ -41,9 +59,10 @@ pub enum Request {
     Shares {
         id: u64,
     },
-    LocalDirectory {
+    MatchPaths {
         id: u64,
-        path: PathBuf,
+        input: String,
+        cwd: PathBuf,
         hidden: bool,
     },
     CreateShare {
@@ -87,6 +106,22 @@ pub struct TransferOutcome {
 }
 
 pub enum Message {
+    Session {
+        epoch: u64,
+        message: Box<Message>,
+    },
+    Authenticated {
+        id: u64,
+        result: Result<AuthorizedAccount, String>,
+    },
+    SignedOut {
+        id: u64,
+        result: Result<SettingsView, String>,
+    },
+    LanguageSaved {
+        language: Language,
+        result: Result<(), String>,
+    },
     Account(Result<AccountInfoResult, String>),
     Repositories {
         id: u64,
@@ -100,9 +135,9 @@ pub enum Message {
         id: u64,
         result: Result<Vec<ShareItem>, String>,
     },
-    LocalDirectory {
+    PathMatches {
         id: u64,
-        result: Result<Vec<LocalEntry>, String>,
+        result: Result<super::paths::PathMatches, String>,
     },
     Operation {
         id: u64,
@@ -133,6 +168,9 @@ pub struct Backend {
     transfers: HashMap<u64, TransferWorker>,
     pending: VecDeque<Request>,
     workers: Vec<JoinHandle<()>>,
+    settings: Arc<Mutex<SettingsStore>>,
+    token: Option<SecretToken>,
+    epoch: u64,
 }
 
 impl Backend {
@@ -143,10 +181,59 @@ impl Backend {
             transfers: HashMap::new(),
             pending: VecDeque::new(),
             workers: Vec::new(),
+            settings: Arc::new(Mutex::new(SettingsStore::ephemeral())),
+            token: None,
+            epoch: 0,
         }
     }
 
+    pub fn with_settings(
+        sender: Sender<Message>,
+        demo: bool,
+        settings: SettingsStore,
+        token: Option<SecretToken>,
+    ) -> Self {
+        let mut backend = Self::new(sender, demo);
+        backend.settings = Arc::new(Mutex::new(settings));
+        backend.token = token;
+        backend
+    }
+
     pub fn dispatch(&mut self, request: Request) {
+        // Persist local preferences before processing another key or exiting.
+        // The settings lock is never held during HTTP requests.
+        if let Request::SaveLanguage(language) = request {
+            let result = self
+                .settings
+                .lock()
+                .expect("settings lock")
+                .set_language(language)
+                .map_err(error_text);
+            let _ = self.sender.send(Message::Session {
+                epoch: self.epoch,
+                message: Box::new(Message::LanguageSaved { language, result }),
+            });
+            return;
+        }
+        if let Request::SignOut { id } = request {
+            let result = self
+                .settings
+                .lock()
+                .expect("settings lock")
+                .sign_out()
+                .map_err(error_text);
+            let _ = self.sender.send(Message::Session {
+                epoch: self.epoch,
+                message: Box::new(Message::SignedOut { id, result }),
+            });
+            return;
+        }
+        if let Request::UseSession { epoch, token } = request {
+            self.epoch = epoch;
+            self.token = token;
+            self.pending.clear();
+            return;
+        }
         if let Request::CancelTransfer { id } = request {
             if let Some(worker) = self.transfers.get(&id) {
                 worker.cancel.store(true, Ordering::Relaxed);
@@ -165,8 +252,10 @@ impl Backend {
             }
             let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = cancel.clone();
+            let token = self.token.clone();
             let handle = thread::spawn(move || {
-                let result = transfer(id, &spec, &worker_cancel, &sender).map_err(error_text);
+                let result = transfer(id, &spec, &worker_cancel, &sender, token.as_ref())
+                    .map_err(error_text);
                 let cancelled = worker_cancel.load(Ordering::Relaxed) && result.is_err();
                 let _ = sender.send(Message::TransferFinished {
                     id,
@@ -187,8 +276,9 @@ impl Backend {
                     | Request::Repositories { .. }
                     | Request::Directory { .. }
                     | Request::Shares { .. }
-                    | Request::LocalDirectory { .. }
+                    | Request::MatchPaths { .. }
                     | Request::Copy(_)
+                    | Request::SaveLanguage(_)
             ) {
                 self.pending.retain(|queued| {
                     std::mem::discriminant(queued) != std::mem::discriminant(&request)
@@ -208,13 +298,20 @@ impl Backend {
             };
             let sender = self.sender.clone();
             let demo = self.demo;
+            let epoch = self.epoch;
+            let config = ConfigManager::new()
+                .with_session_token(self.token.as_ref().map(|token| token.expose().to_string()));
+            let settings = self.settings.clone();
             self.workers.push(thread::spawn(move || {
-                let message = if demo {
+                let message = if demo && !matches!(request, Request::SaveLanguage(_)) {
                     super::demo::respond(request)
                 } else {
-                    execute(request)
+                    execute_with_context(request, &config, &settings)
                 };
-                let _ = sender.send(message);
+                let _ = sender.send(Message::Session {
+                    epoch,
+                    message: Box::new(message),
+                });
             }));
         }
     }
@@ -235,18 +332,54 @@ fn error_text(error: anyhow::Error) -> String {
     format!("{error:#}")
 }
 
-fn app() -> App {
-    App::with_request_timeout(Duration::from_secs(30))
+fn app(config: &ConfigManager) -> App {
+    App::with_config_and_timeout(config.clone(), Duration::from_secs(30))
 }
 
 pub fn execute(request: Request) -> Message {
+    execute_with_context(
+        request,
+        &ConfigManager::new(),
+        &Arc::new(Mutex::new(SettingsStore::ephemeral())),
+    )
+}
+
+fn execute_with_context(
+    request: Request,
+    config: &ConfigManager,
+    settings: &Arc<Mutex<SettingsStore>>,
+) -> Message {
     match request {
-        Request::Account => {
-            Message::Account(app().account_service.account_info().map_err(error_text))
-        }
+        Request::UseSession { .. } => unreachable!("session control is dispatched synchronously"),
+        Request::Authenticate { id, credential } => Message::Authenticated {
+            id,
+            result: authenticate(credential, config, settings).map_err(error_text),
+        },
+        Request::SaveLanguage(language) => Message::LanguageSaved {
+            language,
+            result: settings
+                .lock()
+                .expect("settings lock")
+                .set_language(language)
+                .map_err(error_text),
+        },
+        Request::SignOut { id } => Message::SignedOut {
+            id,
+            result: settings
+                .lock()
+                .expect("settings lock")
+                .sign_out()
+                .map_err(error_text),
+        },
+        Request::Account => Message::Account(
+            app(config)
+                .account_service
+                .account_info()
+                .map_err(error_text),
+        ),
         Request::Repositories { id } => Message::Repositories {
             id,
-            result: app()
+            result: app(config)
                 .account_service
                 .repositories()
                 .map(|r| r.repos)
@@ -255,7 +388,7 @@ pub fn execute(request: Request) -> Message {
         Request::Directory { id, location } => {
             // Use the already resolved library ID; avoid re-fetching every library and N+1 timestamp requests on each keypress.
             let result =
-                SeafileClient::with_request_timeout(ConfigManager::new(), Duration::from_secs(30))
+                SeafileClient::with_request_timeout(config.clone(), Duration::from_secs(30))
                     .list_directory_entries_with_time(&location.repo_id, &location.path, false)
                     .map(|entries| entries.into_iter().map(ListItem::from).collect())
                     .map_err(error_text);
@@ -263,15 +396,20 @@ pub fn execute(request: Request) -> Message {
         }
         Request::Shares { id } => Message::Shares {
             id,
-            result: app()
+            result: app(config)
                 .share_service
                 .list_shares(None, 1, 100, true)
                 .map(|r| r.shares)
                 .map_err(error_text),
         },
-        Request::LocalDirectory { id, path, hidden } => Message::LocalDirectory {
+        Request::MatchPaths {
             id,
-            result: local_entries(&path, hidden).map_err(error_text),
+            input,
+            cwd,
+            hidden,
+        } => Message::PathMatches {
+            id,
+            result: super::paths::matches(&input, &cwd, hidden).map_err(error_text),
         },
         Request::CreateShare {
             id,
@@ -280,7 +418,7 @@ pub fn execute(request: Request) -> Message {
             expire_days,
         } => Message::Operation {
             id,
-            result: app()
+            result: app(config)
                 .share_service
                 .share(
                     &remote,
@@ -294,7 +432,7 @@ pub fn execute(request: Request) -> Message {
         },
         Request::CreateRepository { id, name } => Message::Operation {
             id,
-            result: app()
+            result: app(config)
                 .create_service
                 .create_repo(&name)
                 .map(|r| Operation::RepositoryCreated(r.repo))
@@ -302,7 +440,7 @@ pub fn execute(request: Request) -> Message {
         },
         Request::CreateDirectory { id, remote } => Message::Operation {
             id,
-            result: app()
+            result: app(config)
                 .create_service
                 .create_dir(&remote)
                 .map(|_| Operation::DirectoryCreated)
@@ -310,7 +448,7 @@ pub fn execute(request: Request) -> Message {
         },
         Request::Revoke { id, token } => Message::Operation {
             id,
-            result: app()
+            result: app(config)
                 .share_service
                 .unshare(&token)
                 .map(|_| Operation::Revoked)
@@ -321,6 +459,41 @@ pub fn execute(request: Request) -> Message {
             unreachable!("transfers are dispatched separately")
         }
     }
+}
+
+fn authenticate(
+    credential: Credential,
+    config: &ConfigManager,
+    settings: &Arc<Mutex<SettingsStore>>,
+) -> Result<AuthorizedAccount> {
+    let token = match &credential {
+        Credential::Saved(key) => settings.lock().expect("settings lock").token_for(key)?,
+        Credential::Token { token, .. } => token.clone(),
+    };
+    validate_token(token.expose())?;
+    let config = config.with_session_token(Some(token.expose().to_string()));
+    let account = app(&config)
+        .account_service
+        .account_info()
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{}",
+                error_text(error).replace(token.expose(), "[redacted]")
+            )
+        })?;
+    if account.email.trim().is_empty() {
+        bail!("The server did not return an account identity.");
+    }
+    let view = settings.lock().expect("settings lock").activate_verified(
+        &credential,
+        token.clone(),
+        &account,
+    )?;
+    Ok(AuthorizedAccount {
+        token,
+        account,
+        settings: view,
+    })
 }
 
 pub fn local_entries(path: &PathBuf, hidden: bool) -> Result<Vec<LocalEntry>> {
@@ -403,10 +576,16 @@ fn transfer(
     spec: &TransferSpec,
     cancel: &AtomicBool,
     sender: &Sender<Message>,
+    token: Option<&SecretToken>,
 ) -> Result<TransferOutcome> {
+    monitor_transfer(id, cancel, sender, transfer_command(spec, token)?)
+}
+
+fn transfer_command(spec: &TransferSpec, token: Option<&SecretToken>) -> Result<Command> {
     let mut command = Command::new(std::env::current_exe()?);
     command.args(transfer_arguments(spec));
-    monitor_transfer(id, cancel, sender, command)
+    command.env("THUFS_TOKEN", token.map(SecretToken::expose).unwrap_or(""));
+    Ok(command)
 }
 
 fn monitor_transfer(
@@ -579,6 +758,94 @@ fn copy(text: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn settings_are_persisted_before_dispatch_returns_even_if_metadata_workers_are_full() {
+        let (sender, receiver) = mpsc::channel();
+        let mut backend = Backend::new(sender, false);
+        let gate = Arc::new(std::sync::Barrier::new(5));
+        for _ in 0..4 {
+            let gate = gate.clone();
+            backend.workers.push(thread::spawn(move || {
+                gate.wait();
+            }));
+        }
+        backend.dispatch(Request::SaveLanguage(Language::Chinese));
+        assert_eq!(
+            backend.settings.lock().unwrap().view().language,
+            Language::Chinese
+        );
+        assert!(
+            matches!(receiver.try_recv(), Ok(Message::Session { message, .. }) if matches!(*message, Message::LanguageSaved { result: Ok(()), .. }))
+        );
+        backend.dispatch(Request::SignOut { id: 5 });
+        assert!(
+            matches!(receiver.try_recv(), Ok(Message::Session { message, .. }) if matches!(*message, Message::SignedOut { id: 5, result: Ok(_), .. }))
+        );
+        assert!(backend.pending.is_empty());
+        gate.wait();
+        for worker in backend.workers.drain(..) {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn transfers_use_the_selected_token_in_the_environment_and_never_in_arguments() {
+        let spec = TransferSpec::Download {
+            remote: "repo:Research/a.txt".into(),
+            local: PathBuf::from("/tmp"),
+            policy: "uniquify".into(),
+        };
+        let token = SecretToken::new("selected-account-secret".into());
+        let command = transfer_command(&spec, Some(&token)).unwrap();
+        let value = command
+            .get_envs()
+            .find(|(key, _)| *key == "THUFS_TOKEN")
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(value, "selected-account-secret");
+        assert!(
+            !command
+                .get_args()
+                .any(|arg| arg.to_string_lossy().contains("selected-account-secret"))
+        );
+        let signed_out = transfer_command(&spec, None).unwrap();
+        assert_eq!(
+            signed_out
+                .get_envs()
+                .find(|(key, _)| *key == "THUFS_TOKEN")
+                .unwrap()
+                .1
+                .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn invalid_login_never_saves_a_profile_and_session_changes_clear_obsolete_work() {
+        let (sender, _receiver) = mpsc::channel();
+        let mut backend = Backend::new(sender, false);
+        let error = authenticate(
+            Credential::Token {
+                token: SecretToken::new("invalid token with spaces".into()),
+                label: String::new(),
+            },
+            &ConfigManager::new(),
+            &backend.settings,
+        )
+        .err()
+        .unwrap();
+        assert!(!error.to_string().contains("invalid token with spaces"));
+        assert!(backend.settings.lock().unwrap().view().accounts.is_empty());
+        backend.pending.push_back(Request::Shares { id: 1 });
+        backend.dispatch(Request::UseSession {
+            epoch: 2,
+            token: Some(SecretToken::new("different-secret".into())),
+        });
+        assert!(backend.pending.is_empty());
+        assert_eq!(backend.epoch, 2);
+    }
 
     #[test]
     fn rapid_navigation_bounds_workers_and_only_keeps_the_latest_queued_read() {

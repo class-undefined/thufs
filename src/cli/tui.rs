@@ -6,7 +6,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 pub fn build_command() -> Command {
     Command::new("tui")
         .about("Open the interactive cloud drive workspace")
-        .long_about("Browse libraries, queue file transfers, and manage share links in an interactive terminal. Uses your existing token and config. Press / for commands or ? for help.")
+        .long_about("Browse libraries, queue file transfers, and manage share links in an interactive terminal. Sign in with a token inside the TUI or use saved credentials. Press Ctrl+P for commands, 4 for language and account settings, or ? for help.")
         .arg(Arg::new("remote").help("Start at a library or repo:<library>/<directory>"))
         .arg(Arg::new("local").long("local").value_name("DIRECTORY").value_parser(clap::value_parser!(PathBuf)).help("Local directory for uploads and downloads (default: current directory)"))
         .arg(Arg::new("demo").long("demo").action(ArgAction::SetTrue).help("Explore a read-only offline demo without credentials"))

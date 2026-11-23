@@ -44,3 +44,16 @@ fn root_help_includes_the_interactive_workspace() {
         .success()
         .stdout(predicate::str::contains("tui"));
 }
+
+#[test]
+fn tui_help_describes_settings_and_token_login_without_the_old_slash_prompt() {
+    Command::cargo_bin("thufs")
+        .unwrap()
+        .args(["tui", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ctrl+P"))
+        .stdout(predicate::str::contains("language and account settings"))
+        .stdout(predicate::str::contains("Sign in with a token"))
+        .stdout(predicate::str::contains("Press / for commands").not());
+}
