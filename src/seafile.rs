@@ -170,7 +170,10 @@ impl SeafileClient {
     pub fn new(config: ConfigManager) -> Self {
         Self {
             config,
-            http: Client::builder().user_agent("curl/8.5.0").build().expect("failed to build HTTP client"),
+            http: Client::builder()
+                .user_agent("curl/8.5.0")
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 
