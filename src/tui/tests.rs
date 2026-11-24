@@ -1288,6 +1288,7 @@ fn about_and_settings_are_peer_tabs_accessible_by_keyboard_and_single_click() {
 
 fn update_result(available: bool) -> crate::app::update_service::UpdateCheck {
     crate::app::update_service::UpdateCheck {
+        source: crate::app::update_service::UpdateSource::GitHub,
         current_version: env!("CARGO_PKG_VERSION").into(),
         latest_version: Some(
             if available {

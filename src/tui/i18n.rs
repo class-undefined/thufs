@@ -12,15 +12,43 @@ pub enum Language {
 
 impl Language {
     pub fn detect() -> Self {
-        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()))
-            .unwrap_or_default();
-        if locale.to_lowercase().starts_with("zh") {
-            Self::Chinese
-        } else {
-            Self::English
+        Self::detect_with(
+            |key| std::env::var(key).ok(),
+            || sys_locale::get_locales().collect(),
+        )
+    }
+
+    fn detect_with(
+        environment: impl Fn(&str) -> Option<String>,
+        system_locales: impl FnOnce() -> Vec<String>,
+    ) -> Self {
+        // Explicit terminal preferences also work on macOS and Windows, where
+        // the native locale provider otherwise reads the operating system.
+        for key in ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"] {
+            if let Some(locale) = environment(key).filter(|value| !value.trim().is_empty()) {
+                return Self::from_locales(locale.split(':'));
+            }
         }
+        Self::from_locales(system_locales())
+    }
+
+    fn from_locales(locales: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        locales
+            .into_iter()
+            .find_map(|locale| {
+                let language = locale.as_ref().trim().split(['-', '_', '.', '@']).next()?;
+                if language.eq_ignore_ascii_case("zh") {
+                    Some(Self::Chinese)
+                } else if ["en", "C", "POSIX"]
+                    .iter()
+                    .any(|code| language.eq_ignore_ascii_case(code))
+                {
+                    Some(Self::English)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     }
     pub fn next(self) -> Self {
         match self {
@@ -215,6 +243,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ),
     ("Installed: {0}", "已安装：{0}"),
     ("Latest stable: {0}", "最新稳定版：{0}"),
+    ("Source: {0}", "更新来源：{0}"),
     (
         "thufs {0} is available · press 5 for details",
         "发现 thufs {0} · 按 5 查看",
@@ -750,3 +779,95 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "将把 {0} 个项目加入传输队列。",
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::Language;
+
+    fn detect(environment: &[(&str, &str)], native: &[&str]) -> Language {
+        Language::detect_with(
+            |key| {
+                environment
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).into())
+            },
+            || native.iter().map(|value| (*value).into()).collect(),
+        )
+    }
+
+    #[test]
+    fn terminal_preferences_take_priority_and_ignore_empty_values() {
+        for (environment, expected) in [
+            (
+                vec![
+                    ("LC_ALL", "en_US.UTF-8"),
+                    ("LC_MESSAGES", "zh_CN.UTF-8"),
+                    ("LANG", "zh_CN.UTF-8"),
+                ],
+                Language::English,
+            ),
+            (
+                vec![
+                    ("LC_ALL", " "),
+                    ("LC_MESSAGES", "zh_CN.UTF-8"),
+                    ("LANG", "en_US.UTF-8"),
+                ],
+                Language::Chinese,
+            ),
+            (
+                vec![("LANGUAGE", "fr:zh_CN:en"), ("LANG", "en_US.UTF-8")],
+                Language::Chinese,
+            ),
+            (
+                vec![("LANGUAGE", "fr:en:zh_CN"), ("LANG", "zh_CN.UTF-8")],
+                Language::English,
+            ),
+            (vec![("LANG", "zh-Hans-CN")], Language::Chinese),
+        ] {
+            assert_eq!(
+                detect(&environment, &["en-US"]),
+                expected,
+                "{environment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_system_languages_are_used_when_terminal_preferences_are_missing() {
+        assert_eq!(detect(&[], &["zh-Hans-CN", "en-US"]), Language::Chinese);
+        assert_eq!(
+            detect(&[], &["fr-FR", "zh-Hant-TW", "en-US"]),
+            Language::Chinese
+        );
+        assert_eq!(detect(&[], &["en-US", "zh-CN"]), Language::English);
+        assert_eq!(detect(&[("LANG", " ")], &["zh-CN"]), Language::Chinese);
+        assert_eq!(detect(&[], &[]), Language::English);
+        assert_eq!(detect(&[], &["fr-FR", "ja-JP"]), Language::English);
+    }
+
+    #[test]
+    fn posix_locales_and_unsupported_explicit_languages_fall_back_to_english() {
+        for locale in ["C", "C.UTF-8", "POSIX", "de_DE.UTF-8", "zho", ""] {
+            assert_eq!(
+                Language::from_locales([locale]),
+                Language::English,
+                "{locale}"
+            );
+        }
+        for locale in ["zh", "zh_CN.UTF-8", "ZH_tw", "zh-Hans-CN", "zh_CN@modifier"] {
+            assert_eq!(
+                Language::from_locales([locale]),
+                Language::Chinese,
+                "{locale}"
+            );
+        }
+        assert_eq!(
+            detect(
+                &[("LC_ALL", "C.UTF-8"), ("LANG", "zh_CN.UTF-8")],
+                &["zh-CN"]
+            ),
+            Language::English
+        );
+    }
+}

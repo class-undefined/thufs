@@ -12,7 +12,7 @@ pub fn build_root_command() -> Command {
             "thufs keeps daily THU Cloud Drive work compact in the terminal.\n\n\
 Business verbs stay flat and scriptable: info, repos, ls, upload, download, share, shares, unshare, mkrepo, and mkdir.\n\
 Management verbs stay grouped under auth, config, and update.\n\
-Run thufs tui for the interactive cloud workspace.",
+Run thufs with no command, or thufs tui, for the interactive cloud workspace.",
         )
         .arg(
             Arg::new("json")
@@ -36,5 +36,4 @@ Run thufs tui for the interactive cloud workspace.",
         .subcommand(tui::build_command())
         .subcommand(update::build_command())
         .subcommand_required(false)
-        .arg_required_else_help(true)
 }

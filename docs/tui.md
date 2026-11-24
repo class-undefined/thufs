@@ -3,9 +3,11 @@
 ## 启动
 
 TUI 可以直接使用已有的 thufs 配置和 `THUFS_TOKEN`。
+直接运行 `thufs` 默认打开 TUI，`thufs tui` 仍可用于指定初始目录和其他选项。
 没有可用令牌时会显示 Token 登录表单，无需先退出 TUI 执行认证命令。
 
 ```bash
+thufs
 thufs tui
 thufs tui course-lib
 thufs tui repo:course-lib/slides
@@ -15,7 +17,7 @@ thufs tui --local ~/Downloads
 从当前源码运行：
 
 ```bash
-cargo run --locked -- tui
+cargo run --locked
 ```
 
 未指定资料库时，优先打开配置中的默认资料库，否则打开列表中的第一个资料库。
@@ -74,7 +76,8 @@ Check for updates
 用 `Tab` / `Shift+Tab` 或鼠标单击切换分类，用上下键选择当前分类中的选项，按 `Enter` 更改。
 “界面”包含语言；“网络”包含代理和 User-Agent；“版本更新”包含自动检测开关和手动检查；“账号”包含切换、添加或登录、退出。
 语言项也可以使用左右键切换，修改后立即应用并保存。
-支持 English 和简体中文；首次使用时根据 shell 的语言环境选择，之后使用保存的设置。
+支持 English 和简体中文；首次使用时依次读取 `LC_ALL`、`LC_MESSAGES`、`LANGUAGE`、`LANG`，忽略空值。`LANGUAGE` 支持用冒号分隔语言偏好，例如 `fr:zh_CN:en` 会选择支持的中文。
+未设置这些环境变量时读取 macOS / Windows 等系统的语言偏好；不支持的语言回退为 English。之后优先使用保存的手动设置。
 文件名、路径和账号名称保持原文。
 
 设置中的 `User-Agent` 可自定义 HTTP 请求标识，按 `Enter` 编辑并保存；留空恢复默认。
@@ -90,7 +93,8 @@ Check for updates
 “关于”是与“设置”平级的独立页面，显示 ASCII logo、thufs 版本、作者和项目仓库链接；终端高度较小时使用紧凑 logo。
 按 `5` 或点击顶部“关于”打开，也可按 `Ctrl+P` 搜索 `About` 或“关于”；无需登录即可查看，按 `Esc` 返回文件页。
 
-TUI 启动时在后台检测 GitHub 最新稳定 Release，缓存结果 24 小时；设置页的“自动检测更新”可关闭启动检测，偏好保存在 `tui.json`。
+TUI 启动时在后台检测最新稳定版本，缓存结果 24 小时。通过 Cargo 安装时，根据当前可执行文件所属安装根目录的 `.crates2.json` 记录查询 crates.io，排除预发布和已撤回版本；其他安装方式查询 GitHub 最新稳定 Release。支持 Cargo 默认目录和自定义 `--root` 目录。
+更新详情会显示检测来源，切换安装来源后不会沿用其他来源的缓存。设置页的“自动检测更新”可关闭启动检测，偏好保存在 `tui.json`。
 关于页会显示检测状态。点击“检查更新”或按 `u` / `r` 可跳过缓存重新检测，按 `Enter` 查看版本、发布链接和更新命令，`i` 也可查看失败原因。
 命令面板中的 `Check for updates` / “检查更新”可从任意工作区手动检测。
 网络超时或限流只影响版本检测；演示模式不访问网络。检测使用设置中的 User-Agent，不发送云盘 Token。

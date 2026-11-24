@@ -11,6 +11,7 @@ fn service() -> (tempfile::TempDir, UpdateService) {
     let temp = tempfile::tempdir().unwrap();
     let config = ConfigManager::from_path(temp.path().join("config.json"));
     let mut service = UpdateService::new(config);
+    service.source = UpdateSource::GitHub;
     service.current_version = "0.1.9".into();
     (temp, service)
 }
@@ -113,6 +114,7 @@ fn compares_semantic_versions_without_mistaking_metadata_or_older_releases_for_u
         let result = service
             .result(
                 &CachedRelease {
+                    source: UpdateSource::GitHub,
                     checked_at: 100,
                     tag: Some(tag.into()),
                 },
@@ -131,6 +133,7 @@ fn compares_semantic_versions_without_mistaking_metadata_or_older_releases_for_u
             service
                 .result(
                     &CachedRelease {
+                        source: UpdateSource::GitHub,
                         checked_at: 100,
                         tag: Some(tag.into())
                     },
@@ -245,4 +248,96 @@ fn an_unwritable_cache_does_not_hide_a_successful_update_check_or_leave_temporar
             .update_available
     );
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
+const CRATE: &str = r#"{"versions":[{"num":"0.1.10","yanked":false},{"num":"999.0.0","yanked":true},{"num":"1.0.0-beta.1","yanked":false},{"num":"0.1.9","yanked":false}]}"#;
+
+#[test]
+fn cargo_checks_use_the_latest_non_yanked_stable_crate_with_no_cloud_credentials() {
+    let (temp, mut service) = service();
+    service.source = UpdateSource::CratesIo;
+    service.config.set_token("private-cloud-token").unwrap();
+    service.config.set_user_agent("ExampleClient/2.0").unwrap();
+    let (endpoint, request) = server(200, CRATE);
+    service.endpoint = endpoint;
+    let result = service.check_at(CheckMode::Refresh, 100).unwrap();
+    assert_eq!(result.source, UpdateSource::CratesIo);
+    assert_eq!(result.latest_version.as_deref(), Some("0.1.10"));
+    assert!(result.update_available);
+    assert_eq!(result.release_url, format!("{CRATE_URL}/0.1.10"));
+    let request = request
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(request.contains("accept: application/json"));
+    assert!(request.contains("user-agent: exampleclient/2.0"));
+    assert!(!request.contains("authorization:"));
+    assert!(!request.contains("private-cloud-token"));
+    let cache: serde_json::Value =
+        serde_json::from_slice(&fs::read(temp.path().join("update-check.json")).unwrap()).unwrap();
+    assert_eq!(cache["source"], "crates.io");
+    service.endpoint = "http://127.0.0.1:1/unreachable".into();
+    assert!(service.check_at(CheckMode::Cached, 101).unwrap().cached);
+}
+
+#[test]
+fn switching_install_sources_never_reuses_the_other_sources_cache() {
+    let (temp, mut service) = service();
+    fs::write(
+        temp.path().join("update-check.json"),
+        r#"{"checked_at":100,"tag":"v999.0.0"}"#,
+    )
+    .unwrap();
+    service.source = UpdateSource::CratesIo;
+    let (endpoint, _) = server(200, CRATE);
+    service.endpoint = endpoint;
+    let cargo = service.check_at(CheckMode::Cached, 101).unwrap();
+    assert!(!cargo.cached);
+    assert_eq!(cargo.latest_version.as_deref(), Some("0.1.10"));
+    assert_eq!(cargo.source, UpdateSource::CratesIo);
+    service.source = UpdateSource::GitHub;
+    let (endpoint, _) = server(200, RELEASE);
+    service.endpoint = endpoint;
+    let github = service.check_at(CheckMode::Cached, 102).unwrap();
+    assert!(!github.cached);
+    assert_eq!(github.source, UpdateSource::GitHub);
+    assert_eq!(github.release_url, format!("{RELEASES_URL}/tag/v0.1.10"));
+}
+
+#[test]
+fn yanked_and_prerelease_only_crates_have_no_stable_update() {
+    let (_temp, mut service) = service();
+    service.source = UpdateSource::CratesIo;
+    for body in [
+        r#"{"versions":[]}"#,
+        r#"{"versions":[{"num":"1.0.0-beta.1","yanked":false},{"num":"1.0.0","yanked":true}]}"#,
+    ] {
+        let (endpoint, _) = server(200, body);
+        service.endpoint = endpoint;
+        let result = service.check_at(CheckMode::Refresh, 100).unwrap();
+        assert!(result.latest_version.is_none());
+        assert!(!result.update_available);
+        assert_eq!(result.release_url, CRATE_URL);
+    }
+}
+
+#[test]
+fn invalid_crate_responses_never_replace_a_successful_cache() {
+    for body in [
+        "not JSON",
+        "{}",
+        r#"{"versions":[{"num":"invalid","yanked":false}]}"#,
+    ] {
+        let (temp, mut service) = service();
+        service.source = UpdateSource::CratesIo;
+        let cache = r#"{"checked_at":100,"tag":"0.1.9","source":"crates.io"}"#;
+        fs::write(temp.path().join("update-check.json"), cache).unwrap();
+        let (endpoint, _) = server(200, body);
+        service.endpoint = endpoint;
+        assert!(service.check_at(CheckMode::Refresh, 101).is_err());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("update-check.json")).unwrap(),
+            cache
+        );
+    }
 }

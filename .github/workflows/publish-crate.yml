@@ -91,6 +91,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -103,12 +105,23 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install musl compiler
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
       - name: Build release binary
-        run: cargo build --locked --release --verbose
+        run: cargo build --locked --release --target ${{ matrix.target }} --verbose
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
       - name: Package macOS binary
         if: runner.os == 'macOS'
@@ -117,7 +130,7 @@ jobs:
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           asset="thufs-${version}-${{ matrix.target }}.tar.gz"
           mkdir -p dist
-          cp target/release/thufs dist/thufs
+          cp "target/${{ matrix.target }}/release/thufs" dist/thufs
           tar -C dist -czf "dist/${asset}" thufs
           rm dist/thufs
           (cd dist && shasum -a 256 "${asset}" > "${asset}.sha256")
@@ -129,7 +142,7 @@ jobs:
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           asset="thufs-${version}-${{ matrix.target }}.tar.gz"
           mkdir -p dist
-          cp target/release/thufs dist/thufs
+          cp "target/${{ matrix.target }}/release/thufs" dist/thufs
           tar -C dist -czf "dist/${asset}" thufs
           rm dist/thufs
           (cd dist && sha256sum "${asset}" > "${asset}.sha256")
@@ -142,7 +155,7 @@ jobs:
           $version = $metadata.packages[0].version
           $asset = "thufs-$version-${{ matrix.target }}.zip"
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/thufs.exe dist/thufs.exe
+          Copy-Item "target/${{ matrix.target }}/release/thufs.exe" dist/thufs.exe
           Compress-Archive -Path dist/thufs.exe -DestinationPath "dist/$asset" -Force
           Remove-Item dist/thufs.exe
           $hash = (Get-FileHash "dist/$asset" -Algorithm SHA256).Hash.ToLower()

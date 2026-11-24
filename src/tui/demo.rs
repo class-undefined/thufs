@@ -28,6 +28,7 @@ pub fn respond(request: Request) -> Message {
         Request::CheckUpdates { id, .. } => Message::UpdateChecked {
             id,
             result: Ok(crate::app::update_service::UpdateCheck {
+                source: crate::app::update_service::UpdateSource::GitHub,
                 current_version: env!("CARGO_PKG_VERSION").into(),
                 latest_version: Some(env!("CARGO_PKG_VERSION").into()),
                 update_available: false,

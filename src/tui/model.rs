@@ -941,6 +941,8 @@ impl Model {
                     "Latest stable: {0}",
                     &[result.latest_version.clone().unwrap_or_else(|| "—".into())],
                 ),
+                self.language()
+                    .format("Source: {0}", &[result.source.label().into()]),
                 "".into(),
                 result.release_url.clone(),
                 "".into(),

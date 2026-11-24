@@ -14,15 +14,34 @@ pub fn build_command() -> Command {
 }
 
 pub fn handle(matches: &ArgMatches) -> Result<()> {
+    start(
+        matches,
+        crate::tui::Options {
+            remote: matches.get_one::<String>("remote").cloned(),
+            local: matches.get_one::<PathBuf>("local").cloned(),
+            demo: matches.get_flag("demo"),
+            mouse: !matches.get_flag("no-mouse"),
+        },
+    )
+}
+
+pub fn handle_default(matches: &ArgMatches) -> Result<()> {
+    start(
+        matches,
+        crate::tui::Options {
+            remote: None,
+            local: None,
+            demo: false,
+            mouse: true,
+        },
+    )
+}
+
+fn start(matches: &ArgMatches, options: crate::tui::Options) -> Result<()> {
     if matches.get_flag("json") {
         bail!(
             "tui does not support --json; use repos, ls, upload, download, or shares for scriptable output"
         );
     }
-    crate::tui::run(crate::tui::Options {
-        remote: matches.get_one::<String>("remote").cloned(),
-        local: matches.get_one::<PathBuf>("local").cloned(),
-        demo: matches.get_flag("demo"),
-        mouse: !matches.get_flag("no-mouse"),
-    })
+    crate::tui::run(options)
 }

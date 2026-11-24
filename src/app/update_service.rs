@@ -12,9 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigManager;
 
-const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/class-undefined/thufs/releases/latest";
+mod source;
+pub use source::UpdateSource;
+
 pub const RELEASES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
+const CRATE_URL: &str = "https://crates.io/crates/thufs";
 const CACHE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,7 @@ pub enum CheckMode {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateCheck {
+    pub source: UpdateSource,
     pub current_version: String,
     pub latest_version: Option<String>,
     pub update_available: bool,
@@ -35,6 +38,8 @@ pub struct UpdateCheck {
 
 #[derive(Serialize, Deserialize)]
 struct CachedRelease {
+    #[serde(default)]
+    source: UpdateSource,
     checked_at: u64,
     tag: Option<String>,
 }
@@ -46,17 +51,31 @@ struct LatestRelease {
     prerelease: bool,
 }
 
+#[derive(Deserialize)]
+struct PublishedCrate {
+    versions: Vec<PublishedVersion>,
+}
+
+#[derive(Deserialize)]
+struct PublishedVersion {
+    num: String,
+    yanked: bool,
+}
+
 pub struct UpdateService {
     config: ConfigManager,
+    source: UpdateSource,
     endpoint: String,
     current_version: String,
 }
 
 impl UpdateService {
     pub fn new(config: ConfigManager) -> Self {
+        let source = UpdateSource::detect();
         Self {
             config,
-            endpoint: LATEST_RELEASE_API.into(),
+            source,
+            endpoint: source.endpoint().into(),
             current_version: env!("CARGO_PKG_VERSION").into(),
         }
     }
@@ -86,10 +105,21 @@ impl UpdateService {
         let tag = runtime.block_on(async {
             let response = client
                 .get(&self.endpoint)
-                .header(header::ACCEPT, "application/vnd.github+json")
+                .header(
+                    header::ACCEPT,
+                    match self.source {
+                        UpdateSource::GitHub => "application/vnd.github+json",
+                        UpdateSource::CratesIo => "application/json",
+                    },
+                )
                 .send()
                 .await
-                .context("Cannot contact GitHub to check for updates")?;
+                .with_context(|| {
+                    format!(
+                        "Cannot contact {} to check for updates",
+                        self.source.label()
+                    )
+                })?;
             if response.status() == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
@@ -99,19 +129,46 @@ impl UpdateService {
             ) {
                 bail!("Update check is rate limited. Try again later.");
             }
-            let release: LatestRelease = response
-                .error_for_status()
-                .context("Update check failed")?
-                .json()
-                .await
-                .context("Cannot read the latest release")?;
-            let version = release_version(&release.tag_name)?;
-            if release.draft || release.prerelease || !version.pre.is_empty() {
-                bail!("The latest release is not a stable version.");
+            let response = response.error_for_status().context("Update check failed")?;
+            match self.source {
+                UpdateSource::GitHub => {
+                    let release: LatestRelease = response
+                        .json()
+                        .await
+                        .context("Cannot read the latest release")?;
+                    let version = release_version(&release.tag_name)?;
+                    if release.draft || release.prerelease || !version.pre.is_empty() {
+                        bail!("The latest release is not a stable version.");
+                    }
+                    Ok(Some(release.tag_name))
+                }
+                UpdateSource::CratesIo => {
+                    let published: PublishedCrate = response
+                        .json()
+                        .await
+                        .context("Cannot read the published Cargo versions")?;
+                    let mut latest: Option<Version> = None;
+                    for release in published
+                        .versions
+                        .into_iter()
+                        .filter(|version| !version.yanked)
+                    {
+                        let version = Version::parse(&release.num)
+                            .context("The published Cargo version is not a valid version")?;
+                        if version.pre.is_empty()
+                            && latest
+                                .as_ref()
+                                .is_none_or(|latest| version.cmp_precedence(latest).is_gt())
+                        {
+                            latest = Some(version);
+                        }
+                    }
+                    Ok(latest.map(|version| version.to_string()))
+                }
             }
-            Ok(Some(release.tag_name))
         })?;
         let release = CachedRelease {
+            source: self.source,
             checked_at: now,
             tag,
         };
@@ -124,7 +181,9 @@ impl UpdateService {
     fn read_cache(&self, now: u64) -> Option<UpdateCheck> {
         let bytes = fs::read(self.config.path().with_file_name("update-check.json")).ok()?;
         let release: CachedRelease = serde_json::from_slice(&bytes).ok()?;
-        if now.checked_sub(release.checked_at)? >= CACHE_LIFETIME.as_secs() {
+        if release.source != self.source
+            || now.checked_sub(release.checked_at)? >= CACHE_LIFETIME.as_secs()
+        {
             return None;
         }
         self.result(&release, true).ok()
@@ -140,15 +199,22 @@ impl UpdateService {
             bail!("The cached release is not a stable version.");
         }
         Ok(UpdateCheck {
+            source: self.source,
             current_version: self.current_version.clone(),
             latest_version: latest.as_ref().map(ToString::to_string),
             update_available: latest
                 .as_ref()
                 .is_some_and(|version| version.cmp_precedence(&current).is_gt()),
-            release_url: release.tag.as_ref().map_or_else(
-                || RELEASES_URL.to_string(),
-                |tag| format!("{RELEASES_URL}/tag/{tag}"),
-            ),
+            release_url: match self.source {
+                UpdateSource::GitHub => release.tag.as_ref().map_or_else(
+                    || RELEASES_URL.to_string(),
+                    |tag| format!("{RELEASES_URL}/tag/{tag}"),
+                ),
+                UpdateSource::CratesIo => latest.as_ref().map_or_else(
+                    || CRATE_URL.to_string(),
+                    |version| format!("{CRATE_URL}/{version}"),
+                ),
+            },
             checked_at: release.checked_at,
             cached,
         })

@@ -28,7 +28,7 @@
 
 ## 功能特性
 
-- `tui` 交互式云盘工作区，支持命令面板、文件浏览、传输队列和分享管理
+- 直接运行 `thufs` 进入交互式云盘工作区，支持命令面板、文件浏览、传输队列和分享管理
 - TUI 后台检测新版本，关于页支持手动检查，CLI 提供 `update check`
 - `info` 查看当前 token 对应的账号信息
 - `repos` 或 `libraries` 查看当前可见的仓库或资料库
@@ -80,6 +80,7 @@ cargo build --release
 ```
 
 macOS 用户也可以直接下载 GitHub Release 中对应架构的预编译二进制包。
+CentOS 7 等旧版 Linux 可下载 `x86_64-unknown-linux-musl` 静态包。
 
 如果你的网络环境访问 Rust 官方源较慢，可使用国内镜像：
 
@@ -96,7 +97,8 @@ cargo run -- --help
 
 ## 更新检测
 
-TUI 启动时在后台检查 GitHub 最新稳定 Release，结果缓存 24 小时。
+TUI 启动时在后台检查最新稳定版本，结果缓存 24 小时。通过 Cargo 安装的程序根据安装记录查询 crates.io，忽略预发布和已撤回的版本；其他安装方式查询 GitHub Release。
+检测来源会显示在更新详情和 CLI 输出中，不同来源的缓存不会混用。
 按 `5` 打开关于页，点击“检查更新”或按 `u` 立即重新检查；发现新版本后按 `Enter` 查看发布链接和更新命令。
 设置页的“自动检测更新”可以关闭启动检测，手动检查仍可使用。
 
@@ -228,9 +230,10 @@ thufs upload ./report.pdf submissions/
 
 ### 交互式 TUI
 
-启动交互工作区；未配置 token 时会直接显示登录表单：
+直接执行 `thufs` 即可启动交互工作区；`thufs tui` 仍可使用，未配置 token 时会直接显示登录表单：
 
 ```bash
+thufs
 thufs tui
 thufs tui repo:course-lib/slides
 thufs tui --local ~/Downloads
@@ -239,13 +242,14 @@ thufs tui --local ~/Downloads
 从当前源码运行：
 
 ```bash
-cargo run --locked -- tui
+cargo run --locked
 ```
 
 按 `Ctrl+P` 打开命令面板；终端可转发时也支持 `Cmd+P`。
 按 `1`、`2`、`3`、`4`、`5` 切换文件、传输、分享、设置和关于。
 支持方向键和 `j/k/h/l` 导航，`Space` 多选文件，`u` 上传、`d` 下载、`s` 创建分享。
 设置页分为界面、网络、版本更新和账号四类，分别管理语言、代理与 User-Agent、更新检测、登录与账号切换。
+首次使用时根据机器语言环境选择 English 或简体中文；优先读取 `LC_ALL`、`LC_MESSAGES`、`LANGUAGE`、`LANG`，未设置时读取系统语言。不支持的语言回退为 English；手动选择的语言会保存并优先使用。
 点击分类标签或按 `Tab` / `Shift+Tab` 切换，用上下键选择选项、`Enter` 修改。
 文件和分享列表上方提供搜索框，支持单击或 `Ctrl+F` / `f` 聚焦；文件搜索覆盖整个资料库及子目录，分享搜索支持路径、链接和分享码。分享文件和目录均可按 `d` 下载。
 上传选择器支持路径输入、`Tab` 补全和通配符匹配，`Ctrl+A` 可选择全部匹配文件，再确认上传。
@@ -465,6 +469,7 @@ thufs download repo:course-lib/slides/week1.pdf ./week1.pdf --progress jsonl
 
 | 命令 | 作用 |
 | --- | --- |
+| `thufs` | 默认打开交互式云盘工作区 |
 | `thufs tui [remote]` | 打开交互式云盘工作区 |
 | `thufs info` | 查看当前 token 对应账号信息 |
 | `thufs repos` | 列出当前可见仓库 |

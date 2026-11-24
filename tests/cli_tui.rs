@@ -46,6 +46,27 @@ fn root_help_includes_the_interactive_workspace() {
 }
 
 #[test]
+fn no_command_opens_the_workspace_and_reports_noninteractive_terminals() {
+    Command::cargo_bin("thufs")
+        .unwrap()
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("requires an interactive terminal"));
+}
+
+#[test]
+fn no_command_with_json_is_rejected_before_entering_the_workspace() {
+    Command::cargo_bin("thufs")
+        .unwrap()
+        .arg("--json")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("does not support --json"));
+}
+
+#[test]
 fn tui_help_describes_settings_and_token_login_without_the_old_slash_prompt() {
     Command::cargo_bin("thufs")
         .unwrap()

@@ -8,7 +8,7 @@ pub fn build_command() -> Command {
         .about("Check for new thufs releases")
         .subcommand(
             Command::new("check")
-                .about("Check the latest stable GitHub release without installing it")
+                .about("Check the latest stable version on crates.io for Cargo installs, or GitHub Releases otherwise")
                 .arg(
                     Arg::new("force")
                         .long("force")
@@ -43,6 +43,8 @@ pub fn handle(app: &App, matches: &ArgMatches) -> Result<()> {
                 format!("thufs {} is up to date.", result.current_version)
             };
             app.renderer.write_line(&mut stdout, &status)?;
+            app.renderer
+                .write_line(&mut stdout, &format!("Source: {}", result.source.label()))?;
             app.renderer
                 .write_line(&mut stdout, &format!("Releases: {}", result.release_url))?;
             if result.update_available {

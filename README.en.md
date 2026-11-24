@@ -17,7 +17,7 @@ Instead of being a heavy sync client, `thufs` is designed for SSH sessions, remo
 
 ## Highlights
 
-- `tui` for an interactive workspace with a command palette, file browser, transfer queue, and share management
+- Run `thufs` to open an interactive workspace with a command palette, file browser, transfer queue, and share management
 - `info` to inspect the current token's account info
 - `repos` or `libraries` to list visible repositories
 - `ls` to list remote directories, including repo roots
@@ -57,6 +57,7 @@ cargo build --release
 ```
 
 On macOS, you can also download the prebuilt binary archive for your CPU architecture from GitHub Releases.
+Older Linux systems, including CentOS 7, can use the `x86_64-unknown-linux-musl` static archive.
 
 If Rust downloads are slow in your network environment:
 
@@ -73,7 +74,8 @@ cargo run -- --help
 
 ## Update Checks
 
-The TUI checks the latest stable GitHub Release in the background at startup and caches the result for 24 hours.
+The TUI checks the latest stable version in the background at startup and caches the result for 24 hours. Cargo installations are identified using their installation records and checked against crates.io, excluding prerelease and yanked versions. Other installations use GitHub Releases.
+The update details and CLI output show the source; cached results are kept specific to that source.
 Open About with `5`, then click **Check for updates** or press `u` to check online immediately. Press `Enter` after a check to see the release link and update command.
 Settings includes **Automatic update checks** to disable startup checks; manual checks remain available.
 
@@ -193,9 +195,10 @@ thufs upload ./report.pdf submissions/
 
 ## Quick Start
 
-Open the interactive workspace. If no token is configured, the TUI opens a token login form:
+Run `thufs` to open the interactive workspace; `thufs tui` remains available. If no token is configured, the TUI opens a token login form:
 
 ```bash
+thufs
 thufs tui
 thufs tui repo:course-lib/slides
 thufs tui --local ~/Downloads
@@ -204,7 +207,7 @@ thufs tui --local ~/Downloads
 From the current source checkout:
 
 ```bash
-cargo run --locked -- tui
+cargo run --locked
 ```
 
 ![thufs offline demo: libraries, file browser, and inspector](./docs/assets/tui-files.png)
@@ -213,6 +216,7 @@ Press `Ctrl+P` to open the command palette (`Cmd+P` also works when forwarded by
 Use `1`, `2`, `3`, `4`, or `5` to switch between Files, Transfers, Shares, Settings, and About.
 Navigate with arrow keys or `j/k/h/l`; use `Space` to select files, `u` to upload, `d` to download, and `s` to create a share link.
 Settings is organized into Interface, Network, Updates, and Accounts for language, proxy and User-Agent, version checks, and account management.
+On first use, English or Simplified Chinese is selected from the machine's language preferences. `LC_ALL`, `LC_MESSAGES`, `LANGUAGE`, and `LANG` take precedence, in that order; the system language is used when they are unset. Unsupported languages fall back to English. A manually selected language is saved and takes priority.
 Click a category or use `Tab` / `Shift+Tab`; use the arrow keys to select an option and `Enter` to change it.
 Search fields above the file and share lists support clicking or `Ctrl+F` / `f`. File searches fuzzy-match names and paths across the entire library, including subfolders; share searches also match URLs and share codes. Press `d` to download a selected shared file.
 The upload picker accepts paths and wildcard patterns, with `Tab` completion and `Ctrl+A` to select all matching files before upload confirmation.
@@ -397,6 +401,7 @@ Download mode can also be controlled explicitly:
 
 | Command | Purpose |
 | --- | --- |
+| `thufs` | Open the interactive cloud workspace by default |
 | `thufs tui [remote]` | Open the interactive cloud workspace |
 | `thufs info` | Show account info for the current token |
 | `thufs repos` | List visible repositories |
