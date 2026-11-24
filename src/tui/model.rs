@@ -1,6 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -11,8 +15,11 @@ use crate::{
         account_service::{AccountInfoResult, RepoItem},
         list_service::ListItem,
         share_service::{ShareItem, ShareResult},
+        update_service::{CheckMode, UpdateCheck},
     },
+    config::normalize_user_agent,
     contract::RemoteRef,
+    network::ProxyConfig,
 };
 
 use super::{
@@ -28,6 +35,63 @@ pub enum Workspace {
     Transfers,
     Shares,
     Settings,
+    About,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SettingsCategory {
+    #[default]
+    Interface,
+    Network,
+    Updates,
+    Accounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Language,
+    Proxy,
+    UserAgent,
+    AutomaticUpdates,
+    CheckUpdates,
+    SwitchAccount,
+    SignIn,
+    SignOut,
+}
+
+impl SettingsCategory {
+    pub const ALL: [Self; 4] = [
+        Self::Interface,
+        Self::Network,
+        Self::Updates,
+        Self::Accounts,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Interface => "Interface",
+            Self::Network => "Network",
+            Self::Updates => "Updates",
+            Self::Accounts => "Accounts",
+        }
+    }
+
+    pub fn items(self) -> &'static [Setting] {
+        match self {
+            Self::Interface => &[Setting::Language],
+            Self::Network => &[Setting::Proxy, Setting::UserAgent],
+            Self::Updates => &[Setting::AutomaticUpdates, Setting::CheckUpdates],
+            Self::Accounts => &[Setting::SwitchAccount, Setting::SignIn, Setting::SignOut],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum UpdateState {
+    NotChecked,
+    Checking,
+    Checked(UpdateCheck),
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +157,9 @@ pub enum Action {
     Refresh,
     Sort,
     Details,
+    About,
+    CheckUpdates,
+    Search,
     Help,
     Quit,
     Settings,
@@ -110,10 +177,28 @@ pub struct PaletteCommand {
 
 pub const COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
+        action: Action::Search,
+        name: "Search",
+        description: "Search the entire library or share links",
+        key: "Ctrl+F",
+    },
+    PaletteCommand {
         action: Action::Settings,
         name: "Settings",
-        description: "Language and account settings",
+        description: "Interface, network, updates, and account settings",
         key: "4",
+    },
+    PaletteCommand {
+        action: Action::About,
+        name: "About",
+        description: "Author and project repository",
+        key: "5",
+    },
+    PaletteCommand {
+        action: Action::CheckUpdates,
+        name: "Check for updates",
+        description: "Check the latest stable thufs release",
+        key: "u in About",
     },
     PaletteCommand {
         action: Action::Accounts,
@@ -148,7 +233,7 @@ pub const COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::Download,
         name: "Download",
-        description: "Download the selected files",
+        description: "Download selected files or folders",
         key: "d",
     },
     PaletteCommand {
@@ -255,6 +340,8 @@ impl Field {
 #[derive(Debug, Clone)]
 pub enum FormKind {
     Login,
+    UserAgent,
+    Proxy,
     Upload,
     UploadMany(Vec<PathBuf>),
     Download(Vec<String>),
@@ -272,6 +359,7 @@ pub struct Form {
     pub active: usize,
     pub conflict: usize,
     pub error: Option<String>,
+    path_completion: Option<(u64, PathBuf)>,
 }
 
 impl Form {
@@ -283,6 +371,7 @@ impl Form {
             active: 0,
             conflict: 0,
             error: None,
+            path_completion: None,
         }
     }
     pub fn policy(&self) -> &'static str {
@@ -330,6 +419,7 @@ pub struct Picker {
     pub match_root: PathBuf,
     pub pattern: bool,
     pub truncated: bool,
+    complete_on_load: bool,
 }
 
 impl Picker {
@@ -345,12 +435,26 @@ impl Picker {
             loading: true,
             generation: 0,
             error: None,
-            input: Editor::default(),
+            input: Self::directory_input(&cwd),
             chosen: HashSet::new(),
             match_root: cwd.clone(),
             pattern: false,
             truncated: false,
+            complete_on_load: false,
         }
+    }
+
+    fn directory_input(directory: &std::path::Path) -> Editor {
+        let mut path = directory.display().to_string();
+        if !path.ends_with(std::path::MAIN_SEPARATOR) {
+            path.push(std::path::MAIN_SEPARATOR);
+        }
+        Editor::new(path)
+    }
+
+    fn set_directory(&mut self, directory: PathBuf) {
+        self.input = Self::directory_input(&directory);
+        self.cwd = directory;
     }
 
     pub fn allows_multiple(&self) -> bool {
@@ -400,9 +504,12 @@ impl TransferSpec {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned(),
-            Self::Download { remote, .. } => {
-                remote.rsplit('/').next().unwrap_or(remote).to_string()
-            }
+            Self::Download { remote, .. } => remote
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(remote)
+                .to_string(),
         }
     }
     pub fn direction(&self) -> &'static str {
@@ -485,8 +592,27 @@ pub struct Notice {
     pub since: Instant,
 }
 
+struct LibrarySearch {
+    id: u64,
+    repo_id: String,
+    entries: Vec<ListItem>,
+    loading: bool,
+    error: Option<String>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for LibrarySearch {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 pub struct Model {
+    pub update: UpdateState,
+    update_request: Option<(u64, bool)>,
+    entry_date_request: Option<(u64, Location)>,
     pub settings: SettingsView,
+    pub settings_category: SettingsCategory,
     pub settings_cursor: usize,
     pub signed_in: bool,
     pub session_epoch: u64,
@@ -507,6 +633,7 @@ pub struct Model {
     pub selected: HashSet<String>,
     pub filter: Editor,
     pub filtering: bool,
+    library_search: Option<LibrarySearch>,
     pub sort: Sort,
     pub inspector: bool,
     pub overlay: Option<Overlay>,
@@ -519,6 +646,7 @@ pub struct Model {
     pub shares_loaded: bool,
     pub shares_error: Option<String>,
     pub local: PathBuf,
+    pub download_directory: PathBuf,
     pub should_quit: bool,
     pub quitting: bool,
     pub tick: u64,
@@ -532,13 +660,25 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn new(local: PathBuf, initial_remote: Option<String>, demo: bool) -> Self {
+    pub fn new(
+        local: PathBuf,
+        download_directory: PathBuf,
+        initial_remote: Option<String>,
+        demo: bool,
+    ) -> Self {
         let mut model = Self {
+            update: UpdateState::NotChecked,
+            update_request: None,
+            entry_date_request: None,
             settings: SettingsView {
                 language: Language::English,
                 active_account: None,
                 accounts: Vec::new(),
+                user_agent: None,
+                check_updates: true,
+                proxy: ProxyConfig::Auto,
             },
+            settings_category: SettingsCategory::Interface,
             settings_cursor: 0,
             signed_in: true,
             session_epoch: 0,
@@ -559,6 +699,7 @@ impl Model {
             selected: HashSet::new(),
             filter: Editor::default(),
             filtering: false,
+            library_search: None,
             sort: Sort::Name,
             inspector: true,
             overlay: None,
@@ -571,6 +712,7 @@ impl Model {
             shares_loaded: false,
             shares_error: None,
             local,
+            download_directory,
             should_quit: false,
             quitting: false,
             tick: 0,
@@ -635,7 +777,10 @@ impl Model {
     }
 
     fn reset_account(&mut self) {
-        self.requests.clear();
+        self.entry_date_request = None;
+        self.library_search = None;
+        self.requests
+            .retain(|request| matches!(request, Request::CheckUpdates { .. }));
         self.repos.clear();
         self.entries.clear();
         self.shares.clear();
@@ -679,18 +824,142 @@ impl Model {
         self.toast("Account switched", false);
     }
 
+    pub fn select_settings_category(&mut self, category: SettingsCategory) {
+        if self.settings_category != category {
+            self.settings_category = category;
+            self.settings_cursor = 0;
+        }
+    }
+
+    fn shift_settings_category(&mut self, delta: isize) {
+        let current = SettingsCategory::ALL
+            .iter()
+            .position(|&category| category == self.settings_category)
+            .unwrap_or(0);
+        let index =
+            (current as isize + delta).rem_euclid(SettingsCategory::ALL.len() as isize) as usize;
+        self.select_settings_category(SettingsCategory::ALL[index]);
+    }
+
     fn settings_enter(&mut self) {
-        match self.settings_cursor {
-            0 => {
+        let Some(setting) = self.settings_category.items().get(self.settings_cursor) else {
+            return;
+        };
+        match setting {
+            Setting::Language => {
                 self.settings.language = self.settings.language.next();
                 self.requests
                     .push(Request::SaveLanguage(self.settings.language));
             }
-            1 => self.action(Action::Accounts),
-            2 => self.action(Action::Login),
-            3 => self.action(Action::SignOut),
-            _ => {}
+            Setting::SwitchAccount => self.action(Action::Accounts),
+            Setting::SignIn => self.action(Action::Login),
+            Setting::SignOut => self.action(Action::SignOut),
+            Setting::UserAgent => {
+                self.overlay = Some(Overlay::Form(Form::new(
+                    FormKind::UserAgent,
+                    "User-Agent",
+                    vec![Field::new(
+                        "Custom User-Agent (blank restores default)",
+                        self.settings.user_agent.clone().unwrap_or_default(),
+                    )],
+                )));
+            }
+            Setting::AutomaticUpdates => self
+                .requests
+                .push(Request::SaveUpdateChecks(!self.settings.check_updates)),
+            Setting::Proxy => {
+                let mut address = Field::new(
+                    "Proxy URL",
+                    match &self.settings.proxy {
+                        ProxyConfig::Manual { url } => url.expose(),
+                        _ => "",
+                    },
+                );
+                address.secret = true;
+                self.overlay = Some(Overlay::Form(Form::new(
+                    FormKind::Proxy,
+                    "Proxy settings",
+                    vec![
+                        Field::new("Proxy mode", self.settings.proxy.mode()),
+                        address,
+                    ],
+                )));
+            }
+            Setting::CheckUpdates => self.action(Action::CheckUpdates),
         }
+    }
+
+    pub fn check_for_updates(&mut self, mode: CheckMode) {
+        if matches!(self.update, UpdateState::Checking)
+            || (mode == CheckMode::Cached && (!self.settings.check_updates || self.demo))
+        {
+            return;
+        }
+        let id = self.id();
+        self.update_request = Some((id, mode == CheckMode::Refresh));
+        self.update = UpdateState::Checking;
+        self.requests.push(Request::CheckUpdates { id, mode });
+        if mode == CheckMode::Refresh {
+            self.toast("Checking for updates…", false);
+        }
+    }
+
+    fn load_entry_date(&mut self) {
+        if self.demo || !self.signed_in || self.workspace != Workspace::Files {
+            return;
+        }
+        let (Some(file), Some(parent)) = (self.current_file(), self.location.as_ref()) else {
+            return;
+        };
+        if file.updated_at.is_some() {
+            return;
+        }
+        let location = parent.child(&file.path);
+        if self
+            .entry_date_request
+            .as_ref()
+            .is_some_and(|(_, pending)| pending == &location)
+        {
+            return;
+        }
+        let directory = file.kind == "dir";
+        let id = self.id();
+        self.entry_date_request = Some((id, location.clone()));
+        self.requests.push(Request::EntryDate {
+            id,
+            location,
+            directory,
+        });
+    }
+
+    fn update_details(&mut self) {
+        let lines = match &self.update {
+            UpdateState::Checked(result) => vec![
+                self.language()
+                    .format("Installed: {0}", &[result.current_version.clone()]),
+                self.language().format(
+                    "Latest stable: {0}",
+                    &[result.latest_version.clone().unwrap_or_else(|| "—".into())],
+                ),
+                "".into(),
+                result.release_url.clone(),
+                "".into(),
+                if result.update_available {
+                    "cargo install thufs --locked --force".into()
+                } else {
+                    self.language().tr("No newer release found.").into_owned()
+                },
+            ],
+            UpdateState::Failed(error) => vec![error.clone()],
+            _ => {
+                self.check_for_updates(CheckMode::Refresh);
+                return;
+            }
+        };
+        self.overlay = Some(Overlay::Details {
+            title: "Updates".into(),
+            lines,
+        });
     }
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {
         self.notice = Some(Notice {
@@ -700,50 +969,146 @@ impl Model {
         });
     }
 
+    pub fn searching_library(&self) -> bool {
+        self.workspace == Workspace::Files && !self.filter.text.trim().is_empty()
+    }
+
+    pub fn file_entries(&self) -> &[ListItem] {
+        if self.searching_library() {
+            if let Some(search) = &self.library_search {
+                return &search.entries;
+            }
+        }
+        &self.entries
+    }
+
+    pub fn files_loading(&self) -> bool {
+        if self.searching_library() {
+            if let Some(search) = &self.library_search {
+                return search.loading;
+            }
+        }
+        self.loading
+    }
+
+    pub fn files_error(&self) -> Option<&str> {
+        if self.searching_library() {
+            if let Some(search) = &self.library_search {
+                return search.error.as_deref();
+            }
+        }
+        self.load_error.as_deref()
+    }
+
+    fn clear_search(&mut self) {
+        self.filter = Editor::default();
+        self.filtering = false;
+        self.cursor = 0;
+        self.share_cursor = 0;
+        if self
+            .library_search
+            .as_ref()
+            .is_some_and(|search| search.loading)
+        {
+            self.library_search = None;
+        }
+    }
+
+    fn update_search(&mut self) {
+        if !self.searching_library() {
+            if self
+                .library_search
+                .as_ref()
+                .is_some_and(|search| search.loading)
+            {
+                self.library_search = None;
+            }
+            return;
+        }
+        let Some(location) = &self.location else {
+            return;
+        };
+        if self
+            .library_search
+            .as_ref()
+            .is_some_and(|search| search.repo_id == location.repo_id)
+        {
+            return;
+        }
+        let repo_id = location.repo_id.clone();
+        let id = self.id();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.requests.push(Request::LibraryIndex {
+            id,
+            repo_id: repo_id.clone(),
+            cancel: cancel.clone(),
+        });
+        self.library_search = Some(LibrarySearch {
+            id,
+            repo_id,
+            cancel,
+            entries: self.entries.clone(),
+            loading: true,
+            error: None,
+        });
+    }
+
     pub fn file_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = (0..self.entries.len())
-            .filter(|&i| fuzzy_score(&self.entries[i].name, &self.filter.text).is_some())
+        let entries = self.file_entries();
+        let mut indices: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| {
+                search_score(&[&entry.name, &entry.path], &self.filter.text).map(|score| (i, score))
+            })
             .collect();
-        indices.sort_by(|&a, &b| {
-            let a = &self.entries[a];
-            let b = &self.entries[b];
+        indices.sort_by(|&(a, a_score), &(b, b_score)| {
+            let a = &entries[a];
+            let b = &entries[b];
+            if !self.filter.text.trim().is_empty() {
+                return a_score
+                    .cmp(&b_score)
+                    .then((a.kind != "dir").cmp(&(b.kind != "dir")))
+                    .then(a.path.cmp(&b.path));
+            }
             (a.kind != "dir")
                 .cmp(&(b.kind != "dir"))
-                .then_with(|| {
-                    if !self.filter.text.is_empty() {
-                        return fuzzy_score(&a.name, &self.filter.text)
-                            .cmp(&fuzzy_score(&b.name, &self.filter.text));
-                    }
-                    match self.sort {
-                        Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                        Sort::NameDescending => b.name.to_lowercase().cmp(&a.name.to_lowercase()),
-                        Sort::Size => b.size.cmp(&a.size),
-                    }
+                .then_with(|| match self.sort {
+                    Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                    Sort::NameDescending => b.name.to_lowercase().cmp(&a.name.to_lowercase()),
+                    Sort::Size => b.size.cmp(&a.size),
                 })
-                .then(a.name.cmp(&b.name))
+                .then(a.path.cmp(&b.path))
         });
-        indices
+        indices.into_iter().map(|(index, _)| index).collect()
     }
 
     pub fn current_file(&self) -> Option<&ListItem> {
         self.file_indices()
             .get(self.cursor)
-            .map(|&i| &self.entries[i])
+            .map(|&i| &self.file_entries()[i])
     }
     pub fn share_indices(&self) -> Vec<usize> {
-        (0..self.shares.len())
-            .filter(|&i| {
-                fuzzy_score(
-                    &format!(
-                        "{} {}",
-                        self.shares[i].path.as_deref().unwrap_or_default(),
-                        self.shares[i].repo.as_deref().unwrap_or_default()
-                    ),
+        let mut indices: Vec<_> = self
+            .shares
+            .iter()
+            .enumerate()
+            .filter_map(|(i, share)| {
+                search_score(
+                    &[
+                        share.path.as_deref().unwrap_or_default(),
+                        share.repo.as_deref().unwrap_or_default(),
+                        &share.url,
+                        &share.link,
+                        share.token.as_deref().unwrap_or_default(),
+                    ],
                     &self.filter.text,
                 )
-                .is_some()
+                .map(|score| (i, score))
             })
-            .collect()
+            .collect();
+        indices.sort_by_key(|&(index, score)| (score, index));
+        indices.into_iter().map(|(index, _)| index).collect()
     }
     pub fn current_share(&self) -> Option<&ShareItem> {
         self.share_indices()
@@ -755,8 +1120,16 @@ impl Model {
     }
 
     pub fn navigate(&mut self, location: Location) {
+        self.entry_date_request = None;
         if self.loading && self.location.as_ref() == Some(&location) {
             return;
+        }
+        if !self
+            .location
+            .as_ref()
+            .is_some_and(|current| current.repo_id == location.repo_id)
+        {
+            self.library_search = None;
         }
         if let Some(current) = self.location.as_ref() {
             self.cursors.insert(current.clone(), self.cursor);
@@ -811,6 +1184,13 @@ impl Model {
 
     pub fn enter(&mut self) {
         match self.workspace {
+            Workspace::About => {
+                if matches!(self.update, UpdateState::Checked(_)) {
+                    self.update_details();
+                } else {
+                    self.action(Action::CheckUpdates);
+                }
+            }
             Workspace::Settings => self.settings_enter(),
             Workspace::Files if self.focus == Focus::Libraries => self.open_library(),
             Workspace::Files => {
@@ -819,6 +1199,7 @@ impl Model {
                     if file.kind == "dir" {
                         self.navigate(location.child(&file.path));
                     } else {
+                        let missing_date = file.updated_at.is_none();
                         self.overlay = Some(Overlay::Details {
                             title: file.name.clone(),
                             lines: vec![
@@ -829,10 +1210,23 @@ impl Model {
                                         .map(crate::transfer::format_size)
                                         .unwrap_or_else(|| "unknown".into())
                                 ),
+                                self.language().format(
+                                    "Modified: {0}",
+                                    &[file
+                                        .updated_at
+                                        .as_deref()
+                                        .map(crate::datetime::display)
+                                        .unwrap_or_else(|| {
+                                            self.language().tr("Unknown").into_owned()
+                                        })],
+                                ),
                                 "".into(),
                                 "d  Download     s  Share     y  Copy path".into(),
                             ],
                         });
+                        if missing_date {
+                            self.load_entry_date();
+                        }
                     }
                 }
             }
@@ -844,7 +1238,7 @@ impl Model {
                             share.path.clone().unwrap_or_default(),
                             share.url.clone(),
                             "".into(),
-                            "y  Copy link     x  Revoke (with confirmation)".into(),
+                            "d  Download     y  Copy link     x  Revoke".into(),
                         ],
                     });
                 }
@@ -871,7 +1265,11 @@ impl Model {
 
     pub fn move_cursor(&mut self, delta: isize) {
         let (cursor, len) = match self.workspace {
-            Workspace::Settings => (&mut self.settings_cursor, 4),
+            Workspace::About => return,
+            Workspace::Settings => (
+                &mut self.settings_cursor,
+                self.settings_category.items().len(),
+            ),
             Workspace::Files if self.focus == Focus::Libraries => {
                 (&mut self.library_cursor, self.repos.len())
             }
@@ -955,6 +1353,22 @@ impl Model {
             return;
         }
         match action {
+            Action::Search => {
+                if !matches!(self.workspace, Workspace::Files | Workspace::Shares) {
+                    self.switch(Workspace::Files);
+                }
+                self.focus = Focus::Files;
+                self.filtering = true;
+            }
+            Action::Download if self.workspace == Workspace::Shares => {
+                let Some(share) = self.current_share() else {
+                    self.toast("Select a share link to download.", true);
+                    return;
+                };
+                self.open_picker(PickerPurpose::Download {
+                    remotes: vec![share.url.clone()],
+                });
+            }
             Action::Settings => self.switch(Workspace::Settings),
             Action::Login => {
                 if self.can_switch_account() {
@@ -980,6 +1394,8 @@ impl Model {
             Action::Files => self.switch(Workspace::Files),
             Action::Transfers => self.switch(Workspace::Transfers),
             Action::Shares => self.switch(Workspace::Shares),
+            Action::About => self.switch(Workspace::About),
+            Action::CheckUpdates => self.check_for_updates(CheckMode::Refresh),
             Action::Help => self.overlay = Some(Overlay::Help { scroll: 0 }),
             Action::Quit => {
                 if self.active_transfers() > 0 {
@@ -988,17 +1404,28 @@ impl Model {
                     self.should_quit = true;
                 }
             }
-            Action::Details => self.inspector = !self.inspector,
+            Action::Details if self.workspace == Workspace::About => self.update_details(),
+            Action::Details => {
+                self.inspector = !self.inspector;
+                if self.inspector {
+                    self.load_entry_date();
+                }
+            }
             Action::Sort => {
                 self.sort = self.sort.next();
                 self.cursor = 0;
             }
+            Action::Refresh if self.searching_library() => {
+                self.library_search = None;
+                self.update_search();
+            }
             Action::Refresh => match self.workspace {
-                Workspace::Settings => {}
+                Workspace::Settings | Workspace::About => {}
                 Workspace::Files if self.focus == Focus::Libraries || self.location.is_none() => {
                     self.refresh_repos()
                 }
                 Workspace::Files => {
+                    self.library_search = None;
                     if let Some(location) = self.location.clone() {
                         self.navigate(location);
                     }
@@ -1040,28 +1467,42 @@ impl Model {
                     }
                     Action::Download => {
                         let files: Vec<_> = self
-                            .entries
+                            .file_entries()
                             .iter()
-                            .filter(|f| f.kind == "file" && self.selected.contains(&f.path))
+                            .filter(|f| self.selected.contains(&f.path))
                             .collect();
                         let files = if files.is_empty() {
-                            self.current_file()
-                                .filter(|f| f.kind == "file")
-                                .into_iter()
-                                .collect()
+                            self.current_file().into_iter().collect()
                         } else {
                             files
                         };
                         if files.is_empty() {
                             self.toast(
-                                "Select a file to download. Space selects multiple files.",
+                                "Select a file or folder to download. Space selects multiple items.",
                                 true,
                             );
                             return;
                         }
                         let remotes = files
                             .iter()
-                            .map(|f| format!("repo:{}{}", location.repo, f.path))
+                            .filter(|file| {
+                                !files.iter().any(|parent| {
+                                    parent.kind == "dir"
+                                        && parent.path != file.path
+                                        && file
+                                            .path
+                                            .strip_prefix(parent.path.trim_end_matches('/'))
+                                            .is_some_and(|rest| rest.starts_with('/'))
+                                })
+                            })
+                            .map(|f| {
+                                format!(
+                                    "repo:{}{}{}",
+                                    location.repo,
+                                    f.path.trim_end_matches('/'),
+                                    if f.kind == "dir" { "/" } else { "" }
+                                )
+                            })
                             .collect();
                         self.open_picker(PickerPurpose::Download { remotes });
                     }
@@ -1125,13 +1566,14 @@ impl Model {
             self.overlay_key(key);
             return;
         }
+        if ctrl && key.code == KeyCode::Char('f') {
+            self.action(Action::Search);
+            return;
+        }
         if self.filtering {
             match key.code {
                 KeyCode::Esc => {
-                    self.filtering = false;
-                    self.filter = Editor::default();
-                    self.cursor = 0;
-                    self.share_cursor = 0;
+                    self.clear_search();
                 }
                 KeyCode::Enter => self.filtering = false,
                 KeyCode::Up => self.move_cursor(-1),
@@ -1140,6 +1582,7 @@ impl Model {
                     if self.filter.handle(key) {
                         self.cursor = 0;
                         self.share_cursor = 0;
+                        self.update_search();
                     }
                 }
             }
@@ -1158,7 +1601,14 @@ impl Model {
             KeyCode::Char('1') => self.switch(Workspace::Files),
             KeyCode::Char('2') => self.switch(Workspace::Transfers),
             KeyCode::Char('3') => self.switch(Workspace::Shares),
+            KeyCode::Char('5') => self.switch(Workspace::About),
             KeyCode::Char('q') => self.action(Action::Quit),
+            KeyCode::Tab if self.workspace == Workspace::Settings => {
+                self.shift_settings_category(1)
+            }
+            KeyCode::BackTab if self.workspace == Workspace::Settings => {
+                self.shift_settings_category(-1)
+            }
             KeyCode::Tab | KeyCode::BackTab if self.workspace == Workspace::Files => {
                 self.focus = if self.focus == Focus::Files {
                     Focus::Libraries
@@ -1177,23 +1627,32 @@ impl Model {
             {
                 self.parent()
             }
+            KeyCode::Left | KeyCode::Right if self.workspace == Workspace::Settings => {
+                if self.settings_category.items().get(self.settings_cursor)
+                    == Some(&Setting::Language)
+                {
+                    self.settings_enter();
+                } else {
+                    self.shift_settings_category(if key.code == KeyCode::Left { -1 } else { 1 });
+                }
+            }
             KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') => self.enter(),
-            KeyCode::Left if self.workspace == Workspace::Settings && self.settings_cursor == 0 => {
-                self.settings_enter()
+            KeyCode::Char('f')
+                if matches!(self.workspace, Workspace::Files | Workspace::Shares) =>
+            {
+                self.action(Action::Search)
             }
-            KeyCode::Char('f') if self.workspace != Workspace::Transfers => {
-                self.focus = Focus::Files;
-                self.filtering = true;
+            KeyCode::Esc if matches!(self.workspace, Workspace::Settings | Workspace::About) => {
+                self.switch(Workspace::Files)
             }
-            KeyCode::Esc if self.workspace == Workspace::Settings => self.switch(Workspace::Files),
             KeyCode::Esc => {
-                self.filter = Editor::default();
+                self.clear_search();
                 self.selected.clear();
             }
             KeyCode::Char(' ')
                 if self.workspace == Workspace::Files && self.focus == Focus::Files =>
             {
-                if let Some(file) = self.current_file().filter(|f| f.kind == "file") {
+                if let Some(file) = self.current_file() {
                     let path = file.path.clone();
                     if !self.selected.remove(&path) {
                         self.selected.insert(path);
@@ -1205,8 +1664,7 @@ impl Model {
                 let paths: Vec<_> = self
                     .file_indices()
                     .iter()
-                    .map(|&i| &self.entries[i])
-                    .filter(|f| f.kind == "file")
+                    .map(|&i| &self.file_entries()[i])
                     .map(|f| f.path.clone())
                     .collect();
                 if paths.iter().all(|p| self.selected.contains(p)) {
@@ -1218,7 +1676,12 @@ impl Model {
                 }
             }
             KeyCode::Char('u') if self.workspace == Workspace::Files => self.action(Action::Upload),
-            KeyCode::Char('d') if self.workspace == Workspace::Files => {
+            KeyCode::Char('u') | KeyCode::Char('r') if self.workspace == Workspace::About => {
+                self.action(Action::CheckUpdates)
+            }
+            KeyCode::Char('d')
+                if matches!(self.workspace, Workspace::Files | Workspace::Shares) =>
+            {
                 self.action(Action::Download)
             }
             KeyCode::Char('s') if self.workspace == Workspace::Files => self.action(Action::Share),
@@ -1259,13 +1722,18 @@ impl Model {
                 *selected = 0;
             }
             Some(Overlay::Form(form)) => {
+                if matches!(form.kind, FormKind::Proxy) && form.active == 0 {
+                    return;
+                }
                 form.fields[form.active].editor.insert(text);
                 form.error = None;
+                form.path_completion = None;
             }
             None if self.filtering => {
                 self.filter.insert(text);
                 self.cursor = 0;
                 self.share_cursor = 0;
+                self.update_search();
             }
             _ => {}
         }
@@ -1282,12 +1750,55 @@ impl Model {
         self.load_paths(picker, false);
     }
 
+    fn complete_picker_path(&mut self, picker: &mut Picker) {
+        if picker.loading {
+            picker.complete_on_load = true;
+            return;
+        }
+        // "Use this directory" is an action, not a path completion candidate.
+        let current = picker
+            .entries
+            .first()
+            .filter(|entry| picker.is_current_directory(entry));
+        let offset = usize::from(current.is_some());
+        let directory = current
+            .filter(|_| picker.selected == 0)
+            .map(|entry| entry.path.as_path());
+        if let Some(value) = super::paths::completion(
+            &picker.input.text,
+            &picker.cwd,
+            &picker.entries[offset..],
+            picker.selected.saturating_sub(offset),
+            directory,
+        ) {
+            if value != picker.input.text {
+                picker.input = Editor::new(value);
+                self.refresh_paths(picker);
+            }
+        }
+    }
+
+    fn complete_form_path(&mut self, form: &mut Form) {
+        let id = self.id();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| self.local.clone());
+        form.path_completion = Some((id, cwd.clone()));
+        self.requests.push(Request::MatchPaths {
+            id,
+            input: form.fields[form.active].editor.text.clone(),
+            cwd,
+            hidden: false,
+            directories_only: matches!(form.kind, FormKind::Download(_)),
+            browse: false,
+        });
+    }
+
     fn load_paths(&mut self, picker: &mut Picker, browse: bool) {
         picker.selected = 0;
         picker.chosen.clear();
         picker.entries.clear();
         picker.loading = true;
         picker.error = None;
+        picker.complete_on_load = false;
         picker.generation = self.id();
         picker.browse_target = if browse {
             Some(super::paths::resolve(&picker.input.text, &picker.cwd))
@@ -1305,7 +1816,11 @@ impl Model {
     }
 
     fn open_picker(&mut self, purpose: PickerPurpose) {
-        let mut picker = Picker::new(purpose, self.local.clone());
+        let directory = match &purpose {
+            PickerPurpose::Upload => &self.local,
+            PickerPurpose::Download { .. } => &self.download_directory,
+        };
+        let mut picker = Picker::new(purpose, directory.clone());
         self.refresh_paths(&mut picker);
         self.overlay = Some(Overlay::Picker(picker));
     }
@@ -1323,7 +1838,7 @@ impl Model {
         }
         self.overlay = Some(Overlay::Form(Form::new(
             FormKind::Download(remotes.clone()),
-            "Download files",
+            "Download items",
             vec![Field::new(
                 "Save into an existing local directory",
                 directory.display().to_string(),
@@ -1478,38 +1993,61 @@ impl Model {
                     }
                 }
             }
-            Overlay::Form(form) => match key.code {
-                KeyCode::F(4) | KeyCode::Char('b')
-                    if key.code == KeyCode::F(4)
-                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    if form.can_browse(form.active) {
-                        self.browse_form(form.clone());
-                        return;
-                    }
-                }
-                KeyCode::Tab | KeyCode::Down => form.active = (form.active + 1) % form.fields.len(),
-                KeyCode::BackTab | KeyCode::Up => {
-                    form.active = (form.active + form.fields.len() - 1) % form.fields.len()
-                }
-                KeyCode::Char('o')
-                    if key.modifiers.contains(KeyModifiers::CONTROL) && form.is_transfer() =>
-                {
-                    form.conflict = (form.conflict + 1) % 3
-                }
-                KeyCode::Enter => {
-                    if let Err(error) = self.submit(form.clone()) {
-                        form.error = Some(error);
-                    } else {
-                        return;
-                    }
-                }
-                _ => {
-                    if form.fields[form.active].editor.handle(key) {
+            Overlay::Form(form) => {
+                form.path_completion = None;
+                match key.code {
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                        if matches!(form.kind, FormKind::Proxy) && form.active == 0 =>
+                    {
+                        let modes = ["Auto", "Manual", "Direct"];
+                        let index = modes
+                            .iter()
+                            .position(|mode| *mode == form.fields[0].editor.text)
+                            .unwrap_or(0);
+                        let next = if key.code == KeyCode::Left {
+                            (index + 2) % 3
+                        } else {
+                            (index + 1) % 3
+                        };
+                        form.fields[0].editor = Editor::new(modes[next]);
                         form.error = None;
                     }
+                    KeyCode::F(4) | KeyCode::Char('b')
+                        if key.code == KeyCode::F(4)
+                            || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if form.can_browse(form.active) {
+                            self.browse_form(form.clone());
+                            return;
+                        }
+                    }
+                    KeyCode::Tab if form.can_browse(form.active) => self.complete_form_path(form),
+                    KeyCode::Tab | KeyCode::Down => {
+                        form.active = (form.active + 1) % form.fields.len()
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        form.active = (form.active + form.fields.len() - 1) % form.fields.len()
+                    }
+                    KeyCode::Char('o')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && form.is_transfer() =>
+                    {
+                        form.conflict = (form.conflict + 1) % 3
+                    }
+                    KeyCode::Enter => {
+                        if let Err(error) = self.submit(form.clone()) {
+                            form.error = Some(error);
+                        } else {
+                            return;
+                        }
+                    }
+                    _ if matches!(form.kind, FormKind::Proxy) && form.active == 0 => {}
+                    _ => {
+                        if form.fields[form.active].editor.handle(key) {
+                            form.error = None;
+                        }
+                    }
                 }
-            },
+            }
             Overlay::Picker(picker) => {
                 let control = key.modifiers.contains(KeyModifiers::CONTROL);
                 let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1520,8 +2058,7 @@ impl Model {
                     }
                     KeyCode::Up if alt => {
                         if let Some(parent) = picker.cwd.parent() {
-                            picker.cwd = parent.to_path_buf();
-                            picker.input = Editor::default();
+                            picker.set_directory(parent.to_path_buf());
                             reload = true;
                         }
                     }
@@ -1578,15 +2115,7 @@ impl Model {
                         }
                     }
                     KeyCode::Tab => {
-                        if let Some(completion) = super::paths::completion(
-                            &picker.input.text,
-                            &picker.cwd,
-                            &picker.entries,
-                            picker.selected,
-                        ) {
-                            picker.input = Editor::new(completion);
-                            reload = true;
-                        }
+                        self.complete_picker_path(picker);
                     }
                     KeyCode::Enter => {
                         let files: Vec<_> = picker
@@ -1604,8 +2133,7 @@ impl Model {
                                 self.review_download(picker, &entry.path);
                                 return;
                             } else if entry.is_dir {
-                                picker.cwd = entry.path.clone();
-                                picker.input = Editor::default();
+                                picker.set_directory(entry.path.clone());
                                 reload = true;
                             } else if !picker.directories_only() {
                                 self.review_upload(picker, vec![entry.path.clone()]);
@@ -1661,7 +2189,9 @@ impl Model {
                 return;
             }
             Overlay::Details { .. } => match key.code {
-                KeyCode::Char('d') if self.workspace == Workspace::Files => {
+                KeyCode::Char('d')
+                    if matches!(self.workspace, Workspace::Files | Workspace::Shares) =>
+                {
                     self.action(Action::Download);
                     return;
                 }
@@ -1706,6 +2236,20 @@ impl Model {
         };
         let id = self.id();
         let request = match &form.kind {
+            FormKind::Proxy => Request::SaveProxy {
+                id,
+                proxy: ProxyConfig::from_input(
+                    &form.fields[0].editor.text,
+                    &form.fields[1].editor.text,
+                )
+                .map_err(|error| error.to_string())?,
+            },
+            FormKind::UserAgent => Request::SaveUserAgent {
+                id,
+                value: normalize_user_agent(&form.fields[0].editor.text)
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or_default(),
+            },
             FormKind::UploadMany(files) => {
                 let remote = required(0)?;
                 if !remote.starts_with("repo:") {
@@ -1795,7 +2339,7 @@ impl Model {
                 if !local.is_dir() {
                     return Err("The download directory must already exist.".into());
                 }
-                self.local = local.clone();
+                self.download_directory = local.clone();
                 for remote in remotes {
                     self.enqueue(TransferSpec::Download {
                         remote: remote.clone(),
@@ -1950,7 +2494,7 @@ impl Model {
 
     fn copy_current(&mut self) {
         let text = match self.workspace {
-            Workspace::Settings => None,
+            Workspace::Settings | Workspace::About => None,
             Workspace::Files => self.current_file().and_then(|f| {
                 self.location
                     .as_ref()
@@ -2017,7 +2561,156 @@ impl Model {
                     self.toast("Settings saved", false);
                 }
             }
+            Message::UpdateChecksSaved { enabled, result } => match result {
+                Ok(()) => {
+                    self.settings.check_updates = enabled;
+                    if enabled {
+                        self.check_for_updates(CheckMode::Cached);
+                    } else if self.update_request.is_some_and(|(_, manual)| !manual) {
+                        self.update_request = None;
+                        self.update = UpdateState::NotChecked;
+                        self.requests.retain(|request| {
+                            !matches!(
+                                request,
+                                Request::CheckUpdates {
+                                    mode: CheckMode::Cached,
+                                    ..
+                                }
+                            )
+                        });
+                    }
+                    self.toast("Settings saved", false);
+                }
+                Err(error) => self.toast(error, true),
+            },
+            Message::UpdateChecked { id, result }
+                if self
+                    .update_request
+                    .is_some_and(|(pending, _)| pending == id) =>
+            {
+                let manual = self.update_request.take().is_some_and(|(_, manual)| manual);
+                match result {
+                    Ok(result) => {
+                        if result.update_available {
+                            self.toast(
+                                self.language().format(
+                                    "thufs {0} is available · press 5 for details",
+                                    &[result.latest_version.clone().unwrap_or_default()],
+                                ),
+                                false,
+                            );
+                        } else if manual {
+                            self.toast(
+                                if result.latest_version.is_none() {
+                                    "No stable release published yet"
+                                } else {
+                                    "No newer release found."
+                                },
+                                false,
+                            );
+                        }
+                        self.update = UpdateState::Checked(result);
+                    }
+                    Err(error) => {
+                        self.update = UpdateState::Failed(error);
+                        if manual {
+                            self.toast("Cannot check for updates. Try again later.", true);
+                        }
+                    }
+                }
+            }
+            Message::UserAgentSaved { id, result } if matches!(&self.overlay, Some(Overlay::Busy { id: pending, form }) if *pending == id && matches!(form.kind, FormKind::UserAgent)) =>
+            {
+                let previous = self.overlay.take();
+                match result {
+                    Ok(user_agent) => {
+                        self.settings.user_agent = user_agent;
+                        self.toast("Settings saved", false);
+                    }
+                    Err(error) => {
+                        if let Some(Overlay::Busy { mut form, .. }) = previous {
+                            form.error = Some(error);
+                            self.overlay = Some(Overlay::Form(*form));
+                        }
+                    }
+                }
+            }
+            Message::ProxySaved { id, result } if matches!(&self.overlay, Some(Overlay::Busy { id: pending, form }) if *pending == id && matches!(form.kind, FormKind::Proxy)) =>
+            {
+                let previous = self.overlay.take();
+                match result {
+                    Ok(proxy) => {
+                        self.settings.proxy = proxy;
+                        self.toast("Settings saved", false);
+                    }
+                    Err(error) => {
+                        if let Some(Overlay::Busy { mut form, .. }) = previous {
+                            form.error = Some(error);
+                            self.overlay = Some(Overlay::Form(*form));
+                        }
+                    }
+                }
+            }
             Message::Account(Ok(account)) => self.account = Some(account),
+            Message::EntryDate {
+                id,
+                location,
+                result,
+            } if self
+                .entry_date_request
+                .as_ref()
+                .is_some_and(|(pending, path)| *pending == id && *path == location) =>
+            {
+                self.entry_date_request = None;
+                if !self
+                    .location
+                    .as_ref()
+                    .is_some_and(|current| current.repo_id == location.repo_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(date) => {
+                        for entry in self
+                            .entries
+                            .iter_mut()
+                            .filter(|entry| entry.path == location.path)
+                        {
+                            entry.updated_at = date.clone();
+                        }
+                        if let Some(search) = self
+                            .library_search
+                            .as_mut()
+                            .filter(|search| search.repo_id == location.repo_id)
+                        {
+                            for entry in search
+                                .entries
+                                .iter_mut()
+                                .filter(|entry| entry.path == location.path)
+                            {
+                                entry.updated_at = date.clone();
+                            }
+                        }
+                        let modified = self.language().format(
+                            "Modified: {0}",
+                            &[date
+                                .as_deref()
+                                .map(crate::datetime::display)
+                                .unwrap_or_else(|| self.language().tr("Unknown").into_owned())],
+                        );
+                        if let Some(Overlay::Details { lines, .. }) = &mut self.overlay {
+                            if lines
+                                .first()
+                                .is_some_and(|line| line == &format!("Path: {}", location.remote()))
+                                && lines.len() > 2
+                            {
+                                lines[2] = modified;
+                            }
+                        }
+                    }
+                    Err(_) => self.toast("Cannot load the modification time.", true),
+                }
+            }
             Message::Account(Err(error)) => {
                 self.toast(format!("Account information unavailable: {error}"), true)
             }
@@ -2084,16 +2777,33 @@ impl Model {
                     Err(error) => self.load_error = Some(error),
                 }
             }
+            Message::LibraryIndex { id, result } => {
+                if let Some(search) = &mut self.library_search {
+                    if search.id == id {
+                        search.loading = false;
+                        match result {
+                            Ok(entries) => {
+                                search.entries = entries;
+                                search.error = None;
+                            }
+                            Err(error) => search.error = Some(error),
+                        }
+                        self.cursor = self.cursor.min(self.file_indices().len().saturating_sub(1));
+                    }
+                }
+            }
             Message::PathMatches { id, result } => {
-                if let Some(Overlay::Picker(picker)) = &mut self.overlay {
-                    if picker.generation == id {
+                let Some(mut overlay) = self.overlay.take() else {
+                    return;
+                };
+                match &mut overlay {
+                    Overlay::Picker(picker) if picker.generation == id => {
                         picker.loading = false;
                         match result {
                             Ok(matches) => {
                                 let browse_target = picker.browse_target.take();
                                 if browse_target.is_some() {
-                                    picker.cwd = matches.root.clone();
-                                    picker.input = Editor::default();
+                                    picker.set_directory(matches.root.clone());
                                 }
                                 picker.entries = matches.entries;
                                 if picker.directories_only() {
@@ -2119,11 +2829,45 @@ impl Model {
                                         .position(|entry| entry.path == target)
                                         .unwrap_or(0);
                                 }
+                                if picker.complete_on_load {
+                                    picker.complete_on_load = false;
+                                    self.complete_picker_path(picker);
+                                }
                             }
-                            Err(error) => picker.error = Some(error),
+                            Err(error) => {
+                                picker.complete_on_load = false;
+                                picker.error = Some(error);
+                            }
                         }
                     }
+                    Overlay::Form(form)
+                        if form
+                            .path_completion
+                            .as_ref()
+                            .is_some_and(|(pending, _)| *pending == id)
+                            && form.can_browse(form.active) =>
+                    {
+                        if let Some((_, cwd)) = form.path_completion.take() {
+                            match result {
+                                Ok(matches) => {
+                                    if let Some(value) = super::paths::completion(
+                                        &form.fields[form.active].editor.text,
+                                        &cwd,
+                                        &matches.entries,
+                                        0,
+                                        matches.directory.as_deref(),
+                                    ) {
+                                        form.fields[form.active].editor = Editor::new(value);
+                                    }
+                                    form.error = None;
+                                }
+                                Err(error) => form.error = Some(error),
+                            }
+                        }
+                    }
+                    _ => {}
                 }
+                self.overlay = Some(overlay);
             }
             Message::Shares { id, result } if id == self.share_generation => {
                 self.shares_loading = false;
@@ -2154,11 +2898,13 @@ impl Model {
                         self.shares_loaded = false;
                     }
                     Ok(Operation::RepositoryCreated(name)) => {
+                        self.library_search = None;
                         self.toast(format!("Library {name} is ready"), false);
                         self.initial_remote = Some(name);
                         self.refresh_repos();
                     }
                     Ok(Operation::DirectoryCreated) => {
+                        self.library_search = None;
                         self.toast("Folder created", false);
                         if let Some(location) = self.location.clone() {
                             self.navigate(location);
@@ -2233,6 +2979,7 @@ impl Model {
                     let status = t.status.label();
                     self.toast(format!("{name} · {status}"), failed);
                     if upload_done {
+                        self.library_search = None;
                         if let Some(location) = self.location.clone() {
                             self.navigate(location);
                         }
@@ -2291,6 +3038,16 @@ pub fn palette_matches_in(query: &str, language: Language) -> Vec<usize> {
         .collect();
     matches.sort_by_key(|&(index, score)| (score, index));
     matches.into_iter().map(|(index, _)| index).collect()
+}
+
+fn search_score(fields: &[&str], query: &str) -> Option<usize> {
+    query.split_whitespace().try_fold(0usize, |score, term| {
+        let matched = fields
+            .iter()
+            .filter_map(|field| fuzzy_score(field, term))
+            .min()?;
+        Some(score.saturating_add(matched))
+    })
 }
 
 pub fn fuzzy_score(text: &str, query: &str) -> Option<usize> {

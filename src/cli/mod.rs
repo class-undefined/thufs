@@ -12,6 +12,7 @@ mod share;
 mod shares;
 mod tui;
 mod unshare;
+mod update;
 
 use anyhow::Result;
 use clap::ArgMatches;
@@ -37,6 +38,7 @@ pub fn execute(app: &App, matches: ArgMatches) -> Result<()> {
         Some(("shares", sub_matches)) => shares::handle(app, sub_matches),
         Some(("unshare", sub_matches)) => unshare::handle(app, sub_matches),
         Some(("tui", sub_matches)) => tui::handle(sub_matches),
+        Some(("update", sub_matches)) => update::handle(app, sub_matches),
         _ => Ok(()),
     }
 }

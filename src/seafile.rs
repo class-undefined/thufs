@@ -1,6 +1,8 @@
 use std::{
+    collections::{HashSet, VecDeque},
     io::{Error as IoError, ErrorKind, SeekFrom},
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -99,13 +101,13 @@ struct FileDetail {
     #[serde(default)]
     pub last_modified: Option<String>,
     #[serde(default)]
-    pub mtime: Option<i64>,
+    pub mtime: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DirectoryDetail {
     #[serde(default)]
-    pub mtime: Option<String>,
+    pub mtime: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,11 +161,19 @@ pub struct SharedFileDownload {
     pub download_link: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedDirectory {
+    pub name: Option<String>,
+    pub entries: Vec<DirectoryEntry>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SeafileClient {
     config: ConfigManager,
     http: Client,
+    base_url: String,
+    client_error: Option<String>,
 }
 
 impl SeafileClient {
@@ -176,23 +186,47 @@ impl SeafileClient {
     }
 
     fn build(config: ConfigManager, timeout: Option<std::time::Duration>) -> Self {
-        let mut builder = Client::builder().user_agent("curl/8.5.0");
-        if let Some(timeout) = timeout {
-            builder = builder
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(timeout);
-        }
+        let configured: Result<Client> = (|| {
+            let settings = config.load_file()?;
+            let mut builder = crate::network::client_builder(&settings)?;
+            if let Some(timeout) = timeout {
+                builder = builder
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .timeout(timeout);
+            }
+            builder.build().context("failed to build HTTP client")
+        })();
+        let (http, client_error) = match configured {
+            Ok(client) => (client, None),
+            Err(error) => (
+                Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("failed to build HTTP client"),
+                Some(error.to_string()),
+            ),
+        };
         Self {
             config,
-            http: builder.build().expect("failed to build HTTP client"),
+            http,
+            base_url: THU_CLOUD_BASE_URL.to_string(),
+            client_error,
         }
     }
 
     pub fn base_url(&self) -> &str {
-        THU_CLOUD_BASE_URL
+        &self.base_url
+    }
+
+    #[cfg(test)]
+    pub fn with_base_url(config: ConfigManager, base_url: String) -> Self {
+        let mut client = Self::new(config);
+        client.base_url = base_url;
+        client
     }
 
     pub fn auth_header_value(&self) -> Result<header::HeaderValue> {
+        self.ensure_client()?;
         let config = self.config.load_resolved()?;
         let token = config
             .token
@@ -206,6 +240,7 @@ impl SeafileClient {
     }
 
     fn optional_auth_header_value(&self) -> Result<Option<header::HeaderValue>> {
+        self.ensure_client()?;
         let config = self.config.load_resolved()?;
         let Some(token) = config.token else {
             return Ok(None);
@@ -216,6 +251,13 @@ impl SeafileClient {
             .context("failed to build Authorization header")?;
         header.set_sensitive(true);
         Ok(Some(header))
+    }
+
+    fn ensure_client(&self) -> Result<()> {
+        if let Some(error) = &self.client_error {
+            bail!("{error}");
+        }
+        Ok(())
     }
 
     fn download_auth_header(&self, auth: DownloadAuth) -> Result<Option<header::HeaderValue>> {
@@ -345,24 +387,12 @@ impl SeafileClient {
     ) -> Result<Vec<DirectoryEntry>> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
-            let response = self
-                .http
-                .get(format!("{}/api2/repos/{repo_id}/dir/", self.base_url()))
-                .header(header::AUTHORIZATION, self.auth_header_value()?)
-                .query(&[("p", path)])
-                .send()
-                .await
-                .context("failed to request directory entries")?
-                .error_for_status()
-                .context("directory listing request failed")?;
-
-            let payload = response
-                .json::<Value>()
-                .await
-                .context("failed to decode directory listing")?;
-            let mut entries = parse_directory_entries(path, payload)?;
+            let mut entries = self.directory_entries(repo_id, path).await?;
             if show_time {
                 for entry in &mut entries {
+                    if entry.updated_at.is_some() {
+                        continue;
+                    }
                     entry.updated_at = match entry.kind {
                         EntryKind::File => self.get_file_updated_at(repo_id, &entry.path).await?,
                         EntryKind::Dir => self.get_dir_updated_at(repo_id, &entry.path).await?,
@@ -370,6 +400,84 @@ impl SeafileClient {
                 }
             }
             Ok(entries)
+        })
+    }
+
+    pub fn list_library_entries(
+        &self,
+        repo_id: &str,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<DirectoryEntry>> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        collect_library_entries(cancel, |path| {
+            runtime.block_on(self.directory_entries(repo_id, path))
+        })
+    }
+
+    async fn directory_entries(&self, repo_id: &str, path: &str) -> Result<Vec<DirectoryEntry>> {
+        let response = self
+            .http
+            .get(format!("{}/api2/repos/{repo_id}/dir/", self.base_url()))
+            .header(header::AUTHORIZATION, self.auth_header_value()?)
+            .query(&[("p", path)])
+            .send()
+            .await
+            .context("failed to request directory entries")?
+            .error_for_status()
+            .context("directory listing request failed")?;
+        let payload = response
+            .json::<Value>()
+            .await
+            .context("failed to decode directory listing")?;
+        parse_directory_entries(path, payload)
+    }
+
+    pub fn list_shared_directory(&self, token: &str, path: &str) -> Result<SharedDirectory> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            let payload = self
+                .http
+                .get(format!(
+                    "{}/api/v2.1/share-links/{token}/dirents/",
+                    self.base_url()
+                ))
+                .with_download_auth(self, DownloadAuth::Optional)?
+                .query(&[("path", path)])
+                .send()
+                .await
+                .context("failed to request shared directory")?
+                .error_for_status()
+                .context("shared directory request failed")?
+                .json::<Value>()
+                .await
+                .context("failed to decode shared directory")?;
+            parse_shared_directory(path, payload)
+        })
+    }
+
+    pub fn shared_directory_file_link(&self, token: &str, path: &str) -> Result<String> {
+        let mut url = url::Url::parse(&format!("{}/d/{token}/files/", self.base_url()))?;
+        url.query_pairs_mut()
+            .append_pair("p", path)
+            .append_pair("dl", "1");
+        let url = url.to_string();
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            let mut response = self.http.get(&url)
+                .with_download_auth(self, DownloadAuth::Optional)?
+                .header(header::RANGE, "bytes=0-0")
+                .send().await.context("failed to inspect file in shared directory")?;
+            if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+                response = self.http.get(&url).with_download_auth(self, DownloadAuth::Optional)?
+                    .send().await.context("failed to inspect empty file in shared directory")?;
+            }
+            let response = response.error_for_status().context("shared directory file request failed")?;
+            if response.headers().get(header::CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_filename_from_content_disposition).is_none() {
+                bail!("shared directory file did not return a download; check its access permissions or password");
+            }
+            Ok(url)
         })
     }
 
@@ -611,6 +719,27 @@ impl SeafileClient {
         progress_mode: ProgressMode,
         auth: DownloadAuth,
     ) -> Result<u64> {
+        self.download_file_reported(
+            download_link,
+            destination,
+            mode,
+            workers,
+            progress_mode,
+            auth,
+            None,
+        )
+    }
+
+    pub fn download_file_reported(
+        &self,
+        download_link: &str,
+        destination: &Path,
+        mode: DownloadMode,
+        workers: usize,
+        progress_mode: ProgressMode,
+        auth: DownloadAuth,
+        reporter: Option<ProgressReporter>,
+    ) -> Result<u64> {
         let runtime = Runtime::new().context("failed to create tokio runtime")?;
         runtime.block_on(async {
             let existing_bytes = fs::metadata(destination)
@@ -638,19 +767,20 @@ impl SeafileClient {
                                         workers,
                                         progress_mode,
                                         auth,
+                                        reporter.clone(),
                                     )
                                     .await
                                 {
                                     Ok(bytes) => return Ok(bytes),
                                     Err(err) if mode == DownloadMode::Auto => {
                                         let _ = fs::remove_file(destination).await;
-                                        create_progress_reporter(
+                                        let warning = match reporter.clone() { Some(reporter) => reporter, None => create_progress_reporter(
                                             progress_mode,
                                             "download",
                                             destination.display().to_string(),
                                             Some(support.total_bytes),
-                                        )?
-                                        .warning(format!(
+                                        )? };
+                                        warning.warning(format!(
                                             "parallel download attempt failed; falling back to sequential download: {err}"
                                         ))?;
                                     }
@@ -677,6 +807,7 @@ impl SeafileClient {
                 existing_bytes,
                 progress_mode,
                 auth,
+                reporter,
             )
             .await
         })
@@ -733,20 +864,31 @@ impl SeafileClient {
         requested_parts: usize,
         progress_mode: ProgressMode,
         auth: DownloadAuth,
+        reporter: Option<ProgressReporter>,
     ) -> Result<u64> {
         let ranges = split_download_ranges(total_bytes, requested_parts.max(1));
         if ranges.len() <= 1 {
             return self
-                .download_file_sequential(download_link, destination, 0, progress_mode, auth)
+                .download_file_sequential(
+                    download_link,
+                    destination,
+                    0,
+                    progress_mode,
+                    auth,
+                    reporter,
+                )
                 .await;
         }
 
-        let progress = create_progress_reporter(
-            progress_mode,
-            "download",
-            destination.display().to_string(),
-            Some(total_bytes),
-        )?;
+        let progress = match reporter {
+            Some(reporter) => reporter,
+            None => create_progress_reporter(
+                progress_mode,
+                "download",
+                destination.display().to_string(),
+                Some(total_bytes),
+            )?,
+        };
         progress.set_position(0)?;
         progress.set_message(format!("download {}", destination.display()));
 
@@ -837,6 +979,7 @@ impl SeafileClient {
         existing_bytes: u64,
         progress_mode: ProgressMode,
         auth: DownloadAuth,
+        reporter: Option<ProgressReporter>,
     ) -> Result<u64> {
         let mut request = self
             .http
@@ -858,12 +1001,15 @@ impl SeafileClient {
         let initial_bytes = if resumed { existing_bytes } else { 0 };
 
         let total = response.content_length().map(|len| len + initial_bytes);
-        let progress = create_progress_reporter(
-            progress_mode,
-            "download",
-            destination.display().to_string(),
-            total,
-        )?;
+        let progress = match reporter {
+            Some(reporter) => reporter,
+            None => create_progress_reporter(
+                progress_mode,
+                "download",
+                destination.display().to_string(),
+                total,
+            )?,
+        };
         progress.set_position(initial_bytes)?;
         progress.set_message(format!("download {}", destination.display()));
 
@@ -953,7 +1099,11 @@ impl SeafileClient {
             .json::<FileDetail>()
             .await
             .with_context(|| format!("failed to decode file detail for {path}"))?;
-        Ok(detail.last_modified)
+        Ok(detail
+            .last_modified
+            .as_ref()
+            .and_then(|value| modification_time(&Value::String(value.clone())))
+            .or_else(|| detail.mtime.as_ref().and_then(modification_time)))
     }
 
     async fn get_dir_updated_at(&self, repo_id: &str, path: &str) -> Result<Option<String>> {
@@ -979,7 +1129,23 @@ impl SeafileClient {
             .json::<DirectoryDetail>()
             .await
             .with_context(|| format!("failed to decode directory detail for {path}"))?;
-        Ok(detail.mtime)
+        Ok(detail.mtime.as_ref().and_then(modification_time))
+    }
+
+    pub fn entry_updated_at(
+        &self,
+        repo_id: &str,
+        path: &str,
+        directory: bool,
+    ) -> Result<Option<String>> {
+        let runtime = Runtime::new().context("failed to create tokio runtime")?;
+        runtime.block_on(async {
+            if directory {
+                self.get_dir_updated_at(repo_id, path).await
+            } else {
+                self.get_file_updated_at(repo_id, path).await
+            }
+        })
     }
 
     pub fn create_share_link(&self, request: ShareLinkRequest) -> Result<ShareLink> {
@@ -1246,6 +1412,72 @@ async fn progress_file_part(
     )
 }
 
+fn parse_shared_directory(path: &str, payload: Value) -> Result<SharedDirectory> {
+    let items = payload
+        .get("dirent_list")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("unexpected shared directory listing payload"))?;
+    let raw: Result<Vec<_>> = items.iter().map(|item| {
+        let directory = item.get("is_dir").and_then(Value::as_bool).unwrap_or(false);
+        let name = item.get(if directory { "folder_name" } else { "file_name" })
+            .and_then(Value::as_str).ok_or_else(|| anyhow!("shared directory entry missing name"))?;
+        Ok(serde_json::json!({"name": name, "type": if directory { "dir" } else { "file" }, "size": item.get("size")}))
+    }).collect();
+    let name = payload
+        .get("dir_path")
+        .and_then(Value::as_str)
+        .and_then(|path| path.trim_end_matches('/').rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    Ok(SharedDirectory {
+        name,
+        entries: parse_directory_entries(path, Value::Array(raw?))?,
+    })
+}
+
+fn collect_library_entries(
+    cancel: &AtomicBool,
+    mut list: impl FnMut(&str) -> Result<Vec<DirectoryEntry>>,
+) -> Result<Vec<DirectoryEntry>> {
+    let mut pending = VecDeque::from(["/".to_string()]);
+    let mut visited = HashSet::new();
+    let mut entries = Vec::new();
+    while let Some(path) = pending.pop_front() {
+        if cancel.load(Ordering::Relaxed) {
+            bail!("library search cancelled");
+        }
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let children =
+            list(&path).with_context(|| format!("failed to search library directory `{path}`"))?;
+        for child in children {
+            if child.kind == EntryKind::Dir && !visited.contains(&child.path) {
+                pending.push_back(child.path.clone());
+            }
+            entries.push(child);
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        bail!("library search cancelled");
+    }
+    Ok(entries)
+}
+
+fn modification_time(value: &Value) -> Option<String> {
+    let timestamp = value
+        .as_i64()
+        .or_else(|| value.as_str()?.parse::<i64>().ok());
+    if let Some(timestamp) = timestamp {
+        return crate::datetime::from_timestamp(timestamp);
+    }
+    let text = value.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::datetime::display(text))
+}
+
 fn parse_directory_entries(dir_path: &str, payload: Value) -> Result<Vec<DirectoryEntry>> {
     let items = payload
         .as_array()
@@ -1275,7 +1507,9 @@ fn parse_directory_entries(dir_path: &str, payload: Value) -> Result<Vec<Directo
                 path: full_path,
                 kind,
                 size,
-                updated_at: None,
+                updated_at: ["last_modified", "mtime", "updated_at"]
+                    .iter()
+                    .find_map(|key| item.get(*key).and_then(modification_time)),
             })
         })
         .collect()
@@ -1310,6 +1544,8 @@ mod tests {
                 token: Some("test-token".to_string()),
                 default_repo: Some("course-lib".to_string()),
                 output: OutputMode::Human,
+                user_agent: None,
+                proxy: crate::network::ProxyConfig::Direct,
             })
             .expect("write config");
         (temp, SeafileClient::new(manager))
@@ -1357,6 +1593,128 @@ mod tests {
         let (_temp, client) = configured_client();
         let header = client.auth_header_value().expect("header");
         assert_eq!(header.to_str().expect("str"), "Token test-token");
+    }
+
+    #[test]
+    fn metadata_and_download_requests_use_the_default_or_custom_user_agent() {
+        for custom in [None, Some("ExampleClient/2.0 (custom)")] {
+            let temp = tempdir().unwrap();
+            let config = ConfigManager::from_path(temp.path().join("config.json"));
+            config.set_token("test-token").unwrap();
+            if let Some(value) = custom {
+                config.set_user_agent(value).unwrap();
+            }
+            let expected = custom.unwrap_or(crate::config::DEFAULT_USER_AGENT);
+            let (url, received) = single_request_server(br#"{"email":"demo@example.invalid"}"#);
+            let client =
+                SeafileClient::with_base_url(config, url.trim_end_matches("/file.bin").to_string());
+            client.get_account_info().unwrap();
+            let metadata_request = received.recv().unwrap();
+            let (url, received) = single_request_server(b"data");
+            client
+                .download_file(
+                    &url,
+                    &temp.path().join("download.txt"),
+                    DownloadMode::default(),
+                    1,
+                    ProgressMode::None,
+                    DownloadAuth::Optional,
+                )
+                .unwrap();
+            let download_request = received.recv().unwrap();
+            for request in [&metadata_request, &download_request] {
+                assert!(request.lines().any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("user-agent") && value.trim() == expected
+                    })
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn cloud_metadata_requests_use_the_configured_proxy() {
+        let (_temp, client) = configured_client();
+        let config = client.config.clone();
+        let (proxy, received) = single_request_server(br#"{"email":"demo@example.invalid"}"#);
+        config
+            .set_proxy(
+                &crate::network::ProxyConfig::from_input(
+                    "manual",
+                    proxy.trim_end_matches("/file.bin"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let client =
+            SeafileClient::with_base_url(config, "http://thufs-cloud-proxy.invalid".into());
+        client.get_account_info().unwrap();
+        assert!(
+            received
+                .recv()
+                .unwrap()
+                .starts_with("GET http://thufs-cloud-proxy.invalid/api2/account/info/ HTTP/1.1")
+        );
+    }
+
+    #[test]
+    fn invalid_proxy_configuration_is_reported_without_silently_connecting_directly() {
+        let temp = tempdir().unwrap();
+        let config = ConfigManager::from_path(temp.path().join("config.json"));
+        std::fs::write(config.path(), r#"{"token":"test-token","proxy":{"mode":"manual","url":"file://private-user:private-password@host/data"}}"#).unwrap();
+        let client = SeafileClient::new(config);
+        let error = client.auth_header_value().unwrap_err().to_string();
+        assert!(error.contains("proxy"));
+        assert!(!error.contains("private-password"));
+        assert!(client.optional_auth_header_value().is_err());
+    }
+
+    #[test]
+    fn directory_listings_keep_modification_dates_without_extra_detail_requests() {
+        let entries = super::parse_directory_entries(
+            "/",
+            serde_json::json!([
+                {"name":"one.txt","type":"file","mtime":1704067200},
+                {"name":"folder","type":"dir","mtime":"2026-11-24T10:15:05+08:00"},
+                {"name":"unknown","type":"file","mtime":null}
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            entries[0].updated_at.as_deref(),
+            Some("2024-01-01 08:00:00 +08:00")
+        );
+        assert_eq!(
+            entries[1].updated_at.as_deref(),
+            Some("2026-11-24 10:15:05 +08:00")
+        );
+        assert!(entries[2].updated_at.is_none());
+        assert!(super::modification_time(&serde_json::json!(i64::MAX)).is_none());
+    }
+
+    #[test]
+    fn entry_details_accept_numeric_file_dates_and_directory_dates() {
+        for directory in [false, true] {
+            let (_temp, client) = configured_client();
+            let (url, received) = single_request_server(br#"{"mtime":1704067200}"#);
+            let client = SeafileClient::with_base_url(
+                client.config.clone(),
+                url.trim_end_matches("/file.bin").into(),
+            );
+            assert_eq!(
+                client
+                    .entry_updated_at("repo-id", "/entry", directory)
+                    .unwrap()
+                    .as_deref(),
+                Some("2024-01-01 08:00:00 +08:00")
+            );
+            let request = received.recv().unwrap();
+            assert!(request.contains(if directory {
+                "/dir/detail/"
+            } else {
+                "/file/detail/"
+            }));
+        }
     }
 
     #[test]
@@ -1439,6 +1797,71 @@ mod tests {
     #[test]
     fn default_download_mode_is_sequential() {
         assert_eq!(DownloadMode::default(), DownloadMode::Sequential);
+    }
+
+    #[test]
+    fn library_index_includes_files_in_nested_directories_with_their_full_paths() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut visited = Vec::new();
+        let entries = super::collect_library_entries(&cancel, |path| {
+            visited.push(path.to_string());
+            let payload = match path {
+                "/" => serde_json::json!([
+                    {"name": "reports", "type": "dir"},
+                    {"name": "README.md", "type": "file", "size": 5}
+                ]),
+                "/reports" => serde_json::json!([{"name": "中文", "type": "dir"}]),
+                "/reports/中文" => serde_json::json!([
+                    {"name": "论文草稿.pdf", "type": "file", "size": 42}
+                ]),
+                _ => panic!("unexpected directory"),
+            };
+            super::parse_directory_entries(path, payload)
+        })
+        .unwrap();
+        assert_eq!(visited, ["/", "/reports", "/reports/中文"]);
+        assert_eq!(entries.len(), 4);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == "/reports/中文/论文草稿.pdf" && entry.size == Some(42))
+        );
+    }
+
+    #[test]
+    fn cancelling_library_index_stops_before_reading_the_next_directory() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancel = AtomicBool::new(false);
+        let mut calls = 0;
+        let error = super::collect_library_entries(&cancel, |path| {
+            calls += 1;
+            cancel.store(true, Ordering::Relaxed);
+            super::parse_directory_entries(
+                path,
+                serde_json::json!([{"name": "subfolder", "type": "dir"}]),
+            )
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn library_index_reports_inaccessible_subdirectories_instead_of_returning_partial_success() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let error = super::collect_library_entries(&cancel, |path| {
+            if path == "/" {
+                super::parse_directory_entries(
+                    path,
+                    serde_json::json!([{"name": "private", "type": "dir"}]),
+                )
+            } else {
+                anyhow::bail!("permission denied")
+            }
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("/private"));
+        assert!(format!("{error:#}").contains("permission denied"));
     }
 
     #[test]

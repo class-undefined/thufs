@@ -19,6 +19,8 @@ pub struct ConfigInspection {
     pub default_repo: Option<String>,
     pub output: String,
     pub environment_overrides: Vec<String>,
+    pub user_agent: String,
+    pub proxy: String,
 }
 
 #[derive(Debug, Clone)]
@@ -40,11 +42,17 @@ impl AuthService {
         })
     }
 
+    pub fn set_proxy(&self, proxy: &crate::network::ProxyConfig) -> Result<()> {
+        self.config.set_proxy(proxy)
+    }
+
     pub fn inspect(&self) -> Result<ConfigInspection> {
         let (resolved, overrides) = self.config.resolve()?;
 
         Ok(ConfigInspection {
             config_path: self.config.path().display().to_string(),
+            user_agent: resolved.effective_user_agent().to_string(),
+            proxy: resolved.proxy.description(),
             token: resolved
                 .token
                 .as_deref()
@@ -76,6 +84,8 @@ mod tests {
                 token: Some("file-token-value".to_string()),
                 default_repo: Some("repo-a".to_string()),
                 output: OutputMode::Human,
+                user_agent: None,
+                proxy: crate::network::ProxyConfig::Auto,
             })
             .expect("write config");
 

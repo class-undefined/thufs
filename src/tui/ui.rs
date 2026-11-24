@@ -9,14 +9,14 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::transfer::format_size;
+use crate::{config::DEFAULT_USER_AGENT, transfer::format_size};
 
 use super::{
     editor::Editor,
     i18n::Language,
     model::{
-        COMMANDS, Focus, Form, FormKind, Model, Overlay, Picker, TransferStatus, Workspace,
-        palette_matches_in,
+        COMMANDS, Focus, Form, FormKind, Model, Overlay, Picker, Setting, SettingsCategory,
+        TransferStatus, UpdateState, Workspace, palette_matches_in,
     },
 };
 
@@ -91,6 +91,8 @@ impl Theme {
 
 #[derive(Default)]
 pub struct HitMap {
+    pub check_updates: Rect,
+    pub search: Rect,
     pub libraries: Rect,
     pub files: Rect,
     pub file_header: u16,
@@ -98,6 +100,7 @@ pub struct HitMap {
     pub list_start: usize,
     pub library_start: usize,
     pub tabs: Vec<(Rect, Workspace)>,
+    pub settings_categories: Vec<(Rect, SettingsCategory)>,
     pub dialog: DialogHits,
 }
 
@@ -159,6 +162,7 @@ pub fn draw(frame: &mut Frame, model: &Model) -> HitMap {
         Workspace::Transfers => transfers(frame, model, regions[1], theme, &mut hits),
         Workspace::Shares => shares(frame, model, regions[1], theme, &mut hits),
         Workspace::Settings => settings(frame, model, regions[1], theme, &mut hits),
+        Workspace::About => about(frame, model, regions[1], theme, &mut hits),
     }
     footer(frame, model, regions[2], theme, &mut hits);
     if let Some(overlay) = &model.overlay {
@@ -218,18 +222,29 @@ fn header(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
         ("Transfers", Workspace::Transfers),
         ("Shares", Workspace::Shares),
         ("Settings", Workspace::Settings),
+        ("About", Workspace::About),
     ];
     let mut x = area.x + 1;
     for (index, (label, workspace)) in labels.into_iter().enumerate() {
-        let label = format!("{}  {}", index + 1, t.language.tr(label));
-        let width = cell_width(&label) as u16 + if area.width < 80 { 2 } else { 4 };
+        let compact = area.width < 80;
+        let label = format!(
+            "{}{}{}",
+            index + 1,
+            if compact { " " } else { "  " },
+            t.language.tr(label)
+        );
+        let padding = if compact { " " } else { "  " };
+        let width = cell_width(&label) as u16 + padding.len() as u16 * 2;
         let rect = Rect::new(x, area.y + 3, width, 1);
         let style = if model.workspace == workspace {
             t.selected().fg(t.accent).add_modifier(Modifier::BOLD)
         } else {
             t.muted()
         };
-        frame.render_widget(Paragraph::new(format!("  {label}  ")).style(style), rect);
+        frame.render_widget(
+            Paragraph::new(format!("{padding}{label}{padding}")).style(style),
+            rect,
+        );
         hits.tabs.push((rect, workspace));
         x += width + 1;
     }
@@ -444,16 +459,23 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
         );
     }
     let filtered = model.file_indices();
+    let search_y = inner.y + if compact { 1 } else { 2 };
+    search_field(
+        frame,
+        model,
+        Rect::new(inner.x, search_y, inner.width, 1),
+        t,
+        hits,
+    );
     let count = if model.filter.text.is_empty() {
         t.language
-            .format("{0} items", &[model.entries.len().to_string()])
+            .format("{0} items", &[model.file_entries().len().to_string()])
     } else {
         t.language.format(
-            "{0} of {1} items · filter: {2}",
+            "{0} of {1} items",
             &[
                 filtered.len().to_string(),
-                model.entries.len().to_string(),
-                safe(&model.filter.text),
+                model.file_entries().len().to_string(),
             ],
         )
     };
@@ -461,20 +483,15 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
         frame.render_widget(
             Paragraph::new(format!("{count}  ·  {}", t.language.tr(model.sort.label())))
                 .style(t.muted()),
-            Rect::new(
-                inner.x,
-                inner.y + if compact { 1 } else { 2 },
-                inner.width,
-                1,
-            ),
+            Rect::new(inner.x, search_y + 1, inner.width, 1),
         );
     }
     let top = if minimal {
-        2
-    } else if compact {
         3
-    } else {
+    } else if compact {
         4
+    } else {
+        5
     };
     let body = Rect::new(
         inner.x,
@@ -490,18 +507,22 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
     let rows_height = body.height.saturating_sub(hits.file_header) as usize;
     let start = scroll_start(model.cursor, rows_height, filtered.len());
     hits.list_start = start;
-    if model.loading {
+    if model.files_loading() {
         empty(
             frame,
             body,
             spinner(model.tick),
-            "Loading your files",
+            if model.searching_library() {
+                "Searching the entire library…"
+            } else {
+                "Loading your files"
+            },
             "You can keep using commands while this loads.",
             t,
         );
         return;
     }
-    if let Some(error) = &model.load_error {
+    if let Some(error) = model.files_error() {
         empty(
             frame,
             body,
@@ -551,7 +572,7 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
         return;
     }
     let rows = filtered.iter().skip(start).take(rows_height).map(|&index| {
-        let file = &model.entries[index];
+        let file = &model.file_entries()[index];
         let dir = file.kind == "dir";
         let selected = model.selected.contains(&file.path);
         Row::new(vec![
@@ -571,7 +592,11 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
             })),
             Cell::from(format!(
                 "{}{}",
-                safe(&file.name),
+                safe(if model.searching_library() {
+                    file.path.trim_start_matches('/')
+                } else {
+                    &file.name
+                }),
                 if dir { "/" } else { "" }
             ))
             .style(Style::default().fg(if dir { t.accent } else { t.text })),
@@ -597,7 +622,7 @@ fn files(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitM
     frame.render_stateful_widget(table, body, &mut state);
     let foot = if model.selected.is_empty() {
         t.language
-            .tr("Space select files · a select all")
+            .tr("Space select items · a select all")
             .into_owned()
     } else {
         t.language.format(
@@ -653,6 +678,11 @@ fn inspector(frame: &mut Frame, model: &Model, area: Rect, t: Theme) {
         Line::styled(t.language.tr("SIZE"), t.muted()),
         Line::raw(file.size.map(format_size).unwrap_or_else(|| "—".into())),
         Line::raw(""),
+        Line::styled(t.language.tr("MODIFIED"), t.muted()),
+        Line::raw(safe(&crate::datetime::display(
+            file.updated_at.as_deref().unwrap_or("—"),
+        ))),
+        Line::raw(""),
         Line::styled(t.language.tr("LOCATION"), t.muted()),
         Line::raw(
             model
@@ -670,8 +700,14 @@ fn inspector(frame: &mut Frame, model: &Model, area: Rect, t: Theme) {
         if dir { "Open folder" } else { "Download" },
         t,
     ));
+    if dir {
+        lines.push(compact_hint("d", "Download folder", t));
+    }
     lines.push(compact_hint("s", "Create share link", t));
     lines.push(compact_hint("y", "Copy remote path", t));
+    if area.height < 24 {
+        lines.retain(|line| line.width() > 0);
+    }
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().fg(t.text))
@@ -842,14 +878,45 @@ fn transfers(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut 
             progress[1],
         );
     }
-    frame.render_widget(
-        Paragraph::new(
-            t.language
-                .tr("x cancel  ·  r retry failed/cancelled  ·  enter details  ·  C clear finished"),
-        )
-        .style(t.muted()),
-        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+}
+
+fn search_field(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitMap) {
+    hits.search = area;
+    frame.render_widget(Block::default().style(t.selected()), area);
+    let prefix = format!(
+        "{} › ",
+        t.language.tr(if model.workspace == Workspace::Shares {
+            "Search shares"
+        } else {
+            "Search library"
+        })
     );
+    let prefix_width = cell_width(&prefix) as u16;
+    frame.render_widget(Paragraph::new(prefix).style(t.accent()), area);
+    let input = Rect::new(
+        area.x + prefix_width,
+        area.y,
+        area.width.saturating_sub(prefix_width),
+        1,
+    );
+    if model.filtering {
+        editor(frame, &model.filter, input, false, t);
+    } else if model.filter.text.is_empty() {
+        frame.render_widget(
+            Paragraph::new(t.language.tr(if model.workspace == Workspace::Shares {
+                "Name, link or code · Ctrl+F"
+            } else {
+                "Name or path · Ctrl+F"
+            }))
+            .style(t.muted()),
+            input,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(safe(&model.filter.text)).style(Style::default().fg(t.text)),
+            input,
+        );
+    }
 }
 
 fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitMap) {
@@ -861,14 +928,22 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
     let block = panel(" SHARE LINKS ", true, t);
     let inner = block.inner(area).inner(Margin::new(2, 0));
     frame.render_widget(block, area);
+    let indices = model.share_indices();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(t.language.tr("Shared from your drive"), t.accent()),
             Span::styled(
                 format!(
                     "  ·  {}",
-                    t.language
-                        .format("{0} links", &[model.shares.len().to_string()])
+                    if model.filter.text.trim().is_empty() {
+                        t.language
+                            .format("{0} links", &[model.shares.len().to_string()])
+                    } else {
+                        t.language.format(
+                            "{0} of {1} links",
+                            &[indices.len().to_string(), model.shares.len().to_string()],
+                        )
+                    }
                 ),
                 t.muted(),
             ),
@@ -879,11 +954,18 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
             ..inner
         },
     );
+    search_field(
+        frame,
+        model,
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+        t,
+        hits,
+    );
     let body = Rect::new(
         inner.x,
-        inner.y + 3,
+        inner.y + 4,
         inner.width,
-        inner.height.saturating_sub(5),
+        inner.height.saturating_sub(4),
     );
     hits.files = body;
     hits.file_header = 2;
@@ -910,7 +992,6 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
         );
         return;
     }
-    let indices = model.share_indices();
     let count = body.height.saturating_sub(2) as usize / 2;
     let start = scroll_start(model.share_cursor, count, indices.len());
     hits.list_start = start;
@@ -951,7 +1032,7 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
                 share
                     .expire_date
                     .as_deref()
-                    .map(safe)
+                    .map(|date| safe(&crate::datetime::display(date)))
                     .unwrap_or_else(|| t.language.tr("No expiry").into_owned()),
             )
             .style(t.muted()),
@@ -986,14 +1067,6 @@ fn shares(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut Hit
         table,
         body,
         &mut TableState::default().with_selected(Some(model.share_cursor.saturating_sub(start))),
-    );
-    frame.render_widget(
-        Paragraph::new(
-            t.language
-                .tr("y copy link  ·  enter details  ·  x revoke  ·  f filter  ·  r refresh"),
-        )
-        .style(t.muted()),
-        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
     );
 }
 
@@ -1035,28 +1108,10 @@ fn footer(frame: &mut Frame, model: &Model, area: Rect, t: Theme, _hits: &mut Hi
         Constraint::Length(if area.width >= 90 { 32 } else { 22 }),
     ])
     .split(Rect { height: 1, ..area });
-    if model.filtering {
-        let prefix = format!("{} › ", t.language.tr("Find"));
-        let width = cell_width(&prefix) as u16;
-        frame.render_widget(Paragraph::new(prefix).style(t.accent()), columns[0]);
-        editor(
-            frame,
-            &model.filter,
-            Rect::new(
-                columns[0].x + width,
-                columns[0].y,
-                columns[0].width.saturating_sub(width),
-                1,
-            ),
-            false,
-            t,
-        );
-    } else {
-        frame.render_widget(
-            Paragraph::new(text).style(Style::default().fg(color)),
-            columns[0],
-        );
-    }
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(color)),
+        columns[0],
+    );
     let shortcut = if cfg!(target_os = "macos") {
         "Ctrl/⌘+P"
     } else {
@@ -1079,83 +1134,300 @@ fn footer(frame: &mut Frame, model: &Model, area: Rect, t: Theme, _hits: &mut Hi
                 "↑↓ move  enter open  tab libraries  u upload  4 settings  ? help"
             }
         }
-        Workspace::Transfers => {
-            "↑↓ navigate   x cancel   r retry   enter details   1 files   ? help   q quit"
-        }
-        Workspace::Shares => {
-            "↑↓ navigate   y copy   x revoke   f find   r refresh   1 files   ? help   q quit"
-        }
-        Workspace::Settings => {
-            "↑↓ navigate   enter change   ←→ language   1 files   esc back   q quit"
-        }
+        Workspace::Transfers => "↑↓ x cancel  r retry  enter details  Shift+C clear  ? help",
+        Workspace::Shares => "d download  y copy  x revoke  f search  r refresh  ? help",
+        Workspace::Settings => "tab category  ↑↓ option  enter change  esc back  q quit",
+        Workspace::About => "u check updates   i details   esc back   q quit",
     };
     frame.render_widget(
-        Paragraph::new(t.language.tr(hints)).style(t.muted()),
+        Paragraph::new(t.language.tr(if model.filtering {
+            "Enter keeps results · Esc clears search"
+        } else {
+            hints
+        }))
+        .style(t.muted()),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
+}
+
+const ABOUT_LOGO: [(&str, &str); 5] = [
+    (r" _____   _   _   _   _ ", r"  _____   ____  "),
+    (r"|_   _| | | | | | | | |", r" |  ___| / ___| "),
+    (r"  | |   | |_| | | | | |", r" | |_    \___ \ "),
+    (r"  | |   |  _  | | |_| |", r" |  _|    ___) |"),
+    (r"  |_|   |_| |_|  \___/ ", r" |_|     |____/ "),
+];
+
+const ABOUT_LOGO_COMPACT: [(&str, &str); 3] = [
+    (r"___  | |  | |  ", r" __   __ "),
+    (r" |   |_|  | |  ", r"|_   (__ "),
+    (r" |   | |  |_|  ", r"|     __)"),
+];
+
+fn about(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitMap) {
+    let block = panel(" ABOUT ", true, t);
+    let inner = block.inner(area).inner(Margin::new(2, 1));
+    frame.render_widget(block, area);
+    let compact = inner.height < ABOUT_LOGO.len() as u16 + 9;
+    let logo: &[(&str, &str)] = if compact {
+        &ABOUT_LOGO_COMPACT
+    } else {
+        &ABOUT_LOGO
+    };
+    let mut lines: Vec<_> = logo
+        .iter()
+        .map(|&(thu, fs)| {
+            Line::from(vec![
+                Span::styled(thu, t.accent()),
+                Span::styled(fs, Style::default().fg(t.mint).add_modifier(Modifier::BOLD)),
+            ])
+        })
+        .collect();
+    if !compact {
+        lines.push(Line::raw(""));
+    }
+    let version = format!("thufs  v{}   ", env!("CARGO_PKG_VERSION"));
+    let label = format!(" u {} ", t.language.tr("Check for updates"));
+    let version_row = lines.len() as u16;
+    let version_width = cell_width(&version) as u16;
+    let button_width = cell_width(&label) as u16;
+    lines.push(Line::from(vec![
+        Span::styled(version, t.muted()),
+        Span::styled(label, t.selected()),
+    ]));
+    let (status, style) = match &model.update {
+        UpdateState::NotChecked => (t.language.tr("Updates not checked").into_owned(), t.muted()),
+        UpdateState::Checking => (
+            format!(
+                "{} {}",
+                spinner(model.tick),
+                t.language.tr("Checking for updates…")
+            ),
+            t.muted(),
+        ),
+        UpdateState::Failed(_) => (
+            t.language
+                .tr("Check unavailable · press u to retry")
+                .into_owned(),
+            Style::default().fg(t.red),
+        ),
+        UpdateState::Checked(result) if result.update_available => (
+            t.language.format(
+                "{0} available · Enter for details",
+                &[result.latest_version.clone().unwrap_or_default()],
+            ),
+            Style::default().fg(t.mint),
+        ),
+        UpdateState::Checked(result) if result.latest_version.is_none() => (
+            t.language
+                .tr("No stable release published yet")
+                .into_owned(),
+            t.muted(),
+        ),
+        UpdateState::Checked(_) => (
+            t.language.tr("No newer release found.").into_owned(),
+            t.muted(),
+        ),
+    };
+    lines.push(Line::styled(status, style));
+    if compact {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}  ", t.language.tr("Author")), t.muted()),
+            Span::raw(env!("CARGO_PKG_AUTHORS")),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}  ", t.language.tr("Repository")), t.muted()),
+            Span::raw(env!("CARGO_PKG_REPOSITORY")),
+        ]));
+    } else {
+        lines.extend([
+            Line::raw(""),
+            Line::styled(t.language.tr("Author"), t.muted()),
+            Line::raw(env!("CARGO_PKG_AUTHORS")),
+            Line::raw(""),
+            Line::styled(t.language.tr("Repository"), t.muted()),
+            Line::raw(env!("CARGO_PKG_REPOSITORY")),
+        ]);
+    }
+    let content = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(lines.len() as u16) / 2,
+        inner.width,
+        lines.len() as u16,
+    );
+    hits.check_updates = Rect::new(
+        content.x + content.width.saturating_sub(version_width + button_width) / 2 + version_width,
+        content.y + version_row,
+        button_width,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(t.text))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        content,
+    );
+}
+
+fn current_account_name(model: &Model, t: Theme) -> String {
+    if !model.signed_in {
+        return t.language.tr("Not signed in").into_owned();
+    }
+    let identity = model
+        .account
+        .as_ref()
+        .and_then(|account| {
+            account
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .or_else(|| (!account.email.trim().is_empty()).then(|| account.email.trim()))
+        })
+        .or_else(|| {
+            model
+                .settings
+                .accounts
+                .iter()
+                .find(|account| {
+                    Some(&account.key) == model.settings.active_account.as_ref()
+                        && !account.key.starts_with('@')
+                })
+                .and_then(|account| {
+                    (!account.label.trim().is_empty())
+                        .then(|| account.label.trim())
+                        .or_else(|| {
+                            (!account.detail.trim().is_empty()).then(|| account.detail.trim())
+                        })
+                })
+        });
+    identity
+        .map(safe)
+        .unwrap_or_else(|| t.language.tr("Loading account…").into_owned())
 }
 
 fn settings(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut HitMap) {
     let block = panel(" SETTINGS ", true, t);
     let inner = block.inner(area).inner(Margin::new(2, 1));
     frame.render_widget(block, area);
-    let compact = inner.height < 12;
+    let mut x = inner.x;
+    for category in SettingsCategory::ALL {
+        let label = format!(" {} ", t.language.tr(category.label()));
+        let width = cell_width(&label) as u16;
+        let rect = Rect::new(x, inner.y, width, 1);
+        let style = if category == model.settings_category {
+            t.selected().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else {
+            t.muted()
+        };
+        frame.render_widget(Paragraph::new(label).style(style), rect);
+        hits.settings_categories.push((rect, category));
+        x += width + 1;
+    }
+    let description = match model.settings_category {
+        SettingsCategory::Interface => t.language.tr("Choose the interface language").into_owned(),
+        SettingsCategory::Network => t
+            .language
+            .tr("Proxy and HTTP request settings")
+            .into_owned(),
+        SettingsCategory::Updates => t
+            .language
+            .tr("Version checks and release information")
+            .into_owned(),
+        SettingsCategory::Accounts => model
+            .account
+            .as_ref()
+            .filter(|_| model.signed_in)
+            .map(|account| {
+                safe(&format!(
+                    "{} · {}",
+                    account.name.as_deref().unwrap_or(&account.email),
+                    account.email
+                ))
+            })
+            .unwrap_or_else(|| t.language.tr("Not signed in").into_owned()),
+    };
     frame.render_widget(
-        Paragraph::new(t.language.tr("Language and account settings")).style(t.accent()),
-        Rect { height: 1, ..inner },
+        Paragraph::new(description).style(t.muted()),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
     );
-    let account = model
-        .account
-        .as_ref()
-        .map(|a| format!("{} · {}", a.name.as_deref().unwrap_or(&a.email), a.email))
-        .unwrap_or_else(|| t.language.tr("Not signed in").into_owned());
-    frame.render_widget(
-        Paragraph::new(safe(&account)).style(t.muted()),
-        Rect::new(
-            inner.x,
-            inner.y + if compact { 1 } else { 2 },
-            inner.width,
-            1,
-        ),
-    );
-    let header = if compact { 2 } else { 4 };
-    let row_height = if compact { 1 } else { 2 };
+    let items = model.settings_category.items();
+    let row_height = if inner.height < 10 { 1 } else { 2 };
     let body = Rect::new(
         inner.x,
-        inner.y + header,
+        inner.y + 4,
         inner.width,
-        inner.height.saturating_sub(header),
+        inner.height.saturating_sub(4),
     );
-    hits.files = body;
-    hits.row_height = row_height;
     let visible = (body.height / row_height) as usize;
-    let start = scroll_start(model.settings_cursor, visible, 4);
+    let start = scroll_start(model.settings_cursor, visible, items.len());
+    hits.files = Rect {
+        height: items.len().saturating_sub(start).min(visible) as u16 * row_height,
+        ..body
+    };
+    hits.row_height = row_height;
     hits.list_start = start;
-    for (index, (label, value)) in [
-        ("Language", model.language().label().to_string()),
-        ("Switch account", model.settings.accounts.len().to_string()),
-        (
-            if model.signed_in {
-                "Add account"
-            } else {
-                "Sign in with token"
-            },
-            String::new(),
-        ),
-        ("Sign out", String::new()),
-    ]
-    .into_iter()
-    .enumerate()
-    .skip(start)
-    .take(visible)
-    {
-        let row = Rect::new(
-            body.x,
-            body.y + (index - start) as u16 * row_height,
-            body.width,
-            1,
-        );
+    for (index, setting) in items.iter().enumerate().skip(start).take(visible) {
+        let (label, value) = match setting {
+            Setting::Language => ("Language", model.language().label().to_string()),
+            Setting::Proxy => (
+                "Proxy",
+                t.language
+                    .tr(&model.settings.proxy.description())
+                    .into_owned(),
+            ),
+            Setting::UserAgent => (
+                "User-Agent",
+                model
+                    .settings
+                    .user_agent
+                    .as_deref()
+                    .unwrap_or(DEFAULT_USER_AGENT)
+                    .to_string(),
+            ),
+            Setting::AutomaticUpdates => (
+                "Automatic update checks",
+                t.language
+                    .tr(if model.settings.check_updates {
+                        "On"
+                    } else {
+                        "Off"
+                    })
+                    .into_owned(),
+            ),
+            Setting::CheckUpdates => (
+                "Check for updates",
+                match &model.update {
+                    UpdateState::NotChecked => t.language.tr("Updates not checked").into_owned(),
+                    UpdateState::Checking => t.language.tr("Checking for updates…").into_owned(),
+                    UpdateState::Failed(_) => t.language.tr("Check failed").into_owned(),
+                    UpdateState::Checked(result) => result
+                        .latest_version
+                        .as_ref()
+                        .map(|version| format!("v{version}"))
+                        .unwrap_or_else(|| "—".into()),
+                },
+            ),
+            Setting::SwitchAccount => ("Switch account", current_account_name(model, t)),
+            Setting::SignIn => (
+                if model.signed_in {
+                    "Add account"
+                } else {
+                    "Sign in with token"
+                },
+                String::new(),
+            ),
+            Setting::SignOut => ("Sign out", String::new()),
+        };
         let selected = index == model.settings_cursor;
+        let style = if selected {
+            t.selected()
+        } else if *setting == Setting::SignOut && !model.signed_in {
+            t.muted()
+        } else {
+            Style::default().fg(t.text)
+        };
         frame.render_widget(
             Paragraph::new(format!(
                 "{} {}    {}",
@@ -1163,12 +1435,13 @@ fn settings(frame: &mut Frame, model: &Model, area: Rect, t: Theme, hits: &mut H
                 t.language.tr(label),
                 value
             ))
-            .style(if selected {
-                t.selected()
-            } else {
-                Style::default().fg(t.text)
-            }),
-            row,
+            .style(style),
+            Rect::new(
+                body.x,
+                body.y + (index - start) as u16 * row_height,
+                body.width,
+                1,
+            ),
         );
     }
 }
@@ -1233,7 +1506,12 @@ fn draw_overlay(
                     .get(index)
                     .map(|account| {
                         (
-                            if account.key.starts_with('@') {
+                            if model.settings.active_account.as_ref() == Some(&account.key)
+                                && model.account.is_some()
+                                && model.signed_in
+                            {
+                                current_account_name(model, t)
+                            } else if account.key.starts_with('@') {
                                 t.language.tr(&account.label).into_owned()
                             } else {
                                 safe(&account.label)
@@ -1311,7 +1589,7 @@ fn draw_overlay(
                 [
                     Constraint::Length(13),
                     Constraint::Min(10),
-                    Constraint::Length(5),
+                    Constraint::Length(6),
                 ],
             )
             .column_spacing(1)
@@ -1457,27 +1735,30 @@ fn draw_overlay(
             let lines = vec![
                 Line::styled(t.language.tr("Your cloud drive. One keyboard."), t.accent()),
                 Line::raw(""),
-                hint("1 / 2 / 3 / 4", "Files / Transfers / Shares / Settings", t),
+                hint(
+                    "1/2/3/4/5",
+                    "Files / Transfers / Shares / Settings / About",
+                    t,
+                ),
                 hint("Ctrl/⌘ P", "Search commands; Tab completes", t),
                 hint("↑↓ · j k", "Move selection; PgUp/PgDn page", t),
                 hint("enter · l", "Open library, folder, or details", t),
                 hint("← · h · ⌫", "Parent folder; at root: libraries", t),
                 hint("tab", "Switch between libraries and files", t),
-                hint("f", "Fuzzy filter; Enter keeps, Esc clears", t),
+                hint("Ctrl+F / f", "Search the entire library or share links", t),
                 hint("space · a", "Select file / toggle all visible files", t),
                 hint("u / d / s", "Upload / download / create share link", t),
                 hint("n / N / g", "New folder / new library / go to path", t),
                 hint("o / i / y", "Sort / toggle inspector / copy path", t),
                 hint("r", "Refresh; in Transfers: retry", t),
                 hint("x", "Cancel transfer / confirm share revoke", t),
-                hint("C", "Clear completed transfers", t),
+                hint("Shift+C", "Clear completed transfers", t),
                 hint("ctrl O", "Cycle conflict policy in transfer forms", t),
                 hint("esc / q", "Close overlay / quit workspace", t),
                 Line::raw(""),
                 Line::styled(
-                    t.language.tr(
-                        "Default conflict policy: uniquify. Folder transfers are not supported.",
-                    ),
+                    t.language
+                        .tr("Default conflict policy: uniquify. Folder uploads are not supported."),
                     t.muted(),
                 ),
                 Line::styled(
@@ -1525,10 +1806,17 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme, hits: &mut DialogHits) {
             .language
             .tr("Paste a cloud drive API token. It will be saved privately on this device.")
             .into_owned(),
+        FormKind::UserAgent => t
+            .language
+            .format("Default: {0}", &[DEFAULT_USER_AGENT.into()]),
+        FormKind::Proxy => t
+            .language
+            .tr("Auto uses environment/system proxies. Manual accepts a proxy URL.")
+            .into_owned(),
         FormKind::Share(remote) => safe(remote),
         FormKind::Upload => "Choose the destination and conflict policy before uploading.".into(),
         FormKind::Download(remotes) => t.language.format(
-            "{0} file(s) will be added to your transfer queue.",
+            "{0} item(s) will be added to your transfer queue.",
             &[remotes.len().to_string()],
         ),
         FormKind::Jump => "Library name or repo:<library>/<directory>".into(),
@@ -1572,12 +1860,23 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme, hits: &mut DialogHits) {
         };
         let field_area = Rect::new(input.x + 1, input.y, input.width.saturating_sub(2), 1);
         hits.fields.push((field_area, index));
-        if active {
-            editor(frame, &field.editor, field_area, field.secret, t);
+        if matches!(form.kind, FormKind::Proxy) && index == 0 {
+            frame.render_widget(
+                Paragraph::new(format!("← {} →", t.language.tr(&field.editor.text)))
+                    .style(t.accent()),
+                field_area,
+            );
+            continue;
+        }
+        let secret = if matches!(form.kind, FormKind::Proxy) {
+            field.editor.text.contains('@')
         } else {
-            let (text, _) = field
-                .editor
-                .viewport(field_area.width as usize, field.secret);
+            field.secret
+        };
+        if active {
+            editor(frame, &field.editor, field_area, secret, t);
+        } else {
+            let (text, _) = field.editor.viewport(field_area.width as usize, secret);
             frame.render_widget(
                 Paragraph::new(text).style(Style::default().fg(t.text)),
                 field_area,
@@ -1628,7 +1927,7 @@ fn draw_form(frame: &mut Frame, form: &Form, t: Theme, hits: &mut DialogHits) {
     }
     frame.render_widget(
         Paragraph::new(t.language.tr(if form.can_browse(form.active) {
-            "tab next field   Ctrl+B browse   enter confirm   esc cancel"
+            "tab complete   ↑↓ fields   Ctrl+B browse   enter confirm   esc cancel"
         } else {
             "tab next field   enter confirm   esc cancel"
         }))
@@ -1653,12 +1952,7 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme, hits
     );
     let inner = area.inner(Margin::new(2, 1));
     frame.render_widget(
-        Paragraph::new(format!(
-            "{}  {}",
-            t.language.tr("Path"),
-            safe(&picker.cwd.display().to_string())
-        ))
-        .style(t.muted()),
+        Paragraph::new(t.language.tr("Path")).style(t.muted()),
         Rect {
             height: 1,
             width: inner.width.saturating_sub(6),
@@ -1670,13 +1964,13 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme, hits
     let browse_width = button_width("Browse…", t);
     let browse = Rect::new(
         inner.right().saturating_sub(browse_width),
-        inner.y + 2,
+        inner.y + 1,
         browse_width,
         1,
     );
     let input_area = Rect::new(
         inner.x + 2,
-        inner.y + 2,
+        inner.y + 1,
         inner.width.saturating_sub(browse_width + 4),
         1,
     );
@@ -1731,13 +2025,13 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme, hits
             }
         ))
         .style(t.muted()),
-        Rect::new(inner.x, inner.y + 4, inner.width, 1),
+        Rect::new(inner.x, inner.y + 3, inner.width, 1),
     );
     let body = Rect::new(
         inner.x,
-        inner.y + 6,
+        inner.y + 5,
         inner.width,
-        inner.height.saturating_sub(10),
+        inner.height.saturating_sub(9),
     );
     if picker.loading {
         frame.render_widget(
@@ -1776,11 +2070,7 @@ fn draw_picker(frame: &mut Frame, model: &Model, picker: &Picker, t: Theme, hits
                 Style::default()
             };
             let display = if picker.is_current_directory(entry) {
-                format!(
-                    "{}  {}",
-                    t.language.tr("Use this directory"),
-                    entry.path.display()
-                )
+                t.language.tr("Use this directory").into_owned()
             } else {
                 entry
                     .path

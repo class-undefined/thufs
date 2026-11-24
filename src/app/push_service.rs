@@ -317,6 +317,8 @@ mod tests {
                 token: Some("test-token".to_string()),
                 default_repo: Some("course-lib".to_string()),
                 output: OutputMode::Human,
+                user_agent: None,
+                proxy: crate::network::ProxyConfig::Direct,
             })
             .expect("write config");
 

@@ -21,8 +21,10 @@ use crate::{
         account_service::{AccountInfoResult, RepoItem},
         list_service::ListItem,
         share_service::{ShareItem, ShareOptions, ShareResult},
+        update_service::{CheckMode, UpdateCheck},
     },
     config::ConfigManager,
+    network::ProxyConfig,
     seafile::SeafileClient,
 };
 
@@ -45,6 +47,19 @@ pub enum Request {
         credential: Credential,
     },
     SaveLanguage(Language),
+    SaveUpdateChecks(bool),
+    CheckUpdates {
+        id: u64,
+        mode: CheckMode,
+    },
+    SaveUserAgent {
+        id: u64,
+        value: String,
+    },
+    SaveProxy {
+        id: u64,
+        proxy: ProxyConfig,
+    },
     SignOut {
         id: u64,
     },
@@ -55,6 +70,16 @@ pub enum Request {
     Directory {
         id: u64,
         location: Location,
+    },
+    EntryDate {
+        id: u64,
+        location: Location,
+        directory: bool,
+    },
+    LibraryIndex {
+        id: u64,
+        repo_id: String,
+        cancel: Arc<AtomicBool>,
     },
     Shares {
         id: u64,
@@ -124,12 +149,37 @@ pub enum Message {
         language: Language,
         result: Result<(), String>,
     },
+    UserAgentSaved {
+        id: u64,
+        result: Result<Option<String>, String>,
+    },
+    ProxySaved {
+        id: u64,
+        result: Result<ProxyConfig, String>,
+    },
+    UpdateChecksSaved {
+        enabled: bool,
+        result: Result<(), String>,
+    },
+    UpdateChecked {
+        id: u64,
+        result: Result<UpdateCheck, String>,
+    },
     Account(Result<AccountInfoResult, String>),
     Repositories {
         id: u64,
         result: Result<Vec<RepoItem>, String>,
     },
     Directory {
+        id: u64,
+        result: Result<Vec<ListItem>, String>,
+    },
+    EntryDate {
+        id: u64,
+        location: Location,
+        result: Result<Option<String>, String>,
+    },
+    LibraryIndex {
         id: u64,
         result: Result<Vec<ListItem>, String>,
     },
@@ -204,6 +254,56 @@ impl Backend {
     pub fn dispatch(&mut self, request: Request) {
         // Persist local preferences before processing another key or exiting.
         // The settings lock is never held during HTTP requests.
+        if let Request::SaveProxy { id, proxy } = request {
+            let result = self
+                .settings
+                .lock()
+                .expect("settings lock")
+                .set_proxy(&proxy)
+                .map_err(error_text);
+            let _ = self.sender.send(Message::Session {
+                epoch: self.epoch,
+                message: Box::new(Message::ProxySaved { id, result }),
+            });
+            return;
+        }
+        if let Request::SaveUpdateChecks(enabled) = request {
+            let result = self
+                .settings
+                .lock()
+                .expect("settings lock")
+                .set_update_checks(enabled)
+                .map_err(error_text);
+            if !enabled && result.is_ok() {
+                self.pending.retain(|queued| {
+                    !matches!(
+                        queued,
+                        Request::CheckUpdates {
+                            mode: CheckMode::Cached,
+                            ..
+                        }
+                    )
+                });
+            }
+            let _ = self.sender.send(Message::Session {
+                epoch: self.epoch,
+                message: Box::new(Message::UpdateChecksSaved { enabled, result }),
+            });
+            return;
+        }
+        if let Request::SaveUserAgent { id, value } = request {
+            let result = self
+                .settings
+                .lock()
+                .expect("settings lock")
+                .set_user_agent(&value)
+                .map_err(error_text);
+            let _ = self.sender.send(Message::Session {
+                epoch: self.epoch,
+                message: Box::new(Message::UserAgentSaved { id, result }),
+            });
+            return;
+        }
         if let Request::SaveLanguage(language) = request {
             let result = self
                 .settings
@@ -233,7 +333,8 @@ impl Backend {
         if let Request::UseSession { epoch, token } = request {
             self.epoch = epoch;
             self.token = token;
-            self.pending.clear();
+            self.pending
+                .retain(|queued| matches!(queued, Request::CheckUpdates { .. }));
             return;
         }
         if let Request::CancelTransfer { id } = request {
@@ -277,10 +378,13 @@ impl Backend {
                 Request::Account
                     | Request::Repositories { .. }
                     | Request::Directory { .. }
+                    | Request::EntryDate { .. }
+                    | Request::LibraryIndex { .. }
                     | Request::Shares { .. }
                     | Request::MatchPaths { .. }
                     | Request::Copy(_)
                     | Request::SaveLanguage(_)
+                    | Request::CheckUpdates { .. }
             ) {
                 self.pending.retain(|queued| {
                     std::mem::discriminant(queued) != std::mem::discriminant(&request)
@@ -301,6 +405,7 @@ impl Backend {
             let sender = self.sender.clone();
             let demo = self.demo;
             let epoch = self.epoch;
+            let session_scoped = !matches!(request, Request::CheckUpdates { .. });
             let config = ConfigManager::new()
                 .with_session_token(self.token.as_ref().map(|token| token.expose().to_string()));
             let settings = self.settings.clone();
@@ -310,9 +415,13 @@ impl Backend {
                 } else {
                     execute_with_context(request, &config, &settings)
                 };
-                let _ = sender.send(Message::Session {
-                    epoch,
-                    message: Box::new(message),
+                let _ = sender.send(if session_scoped {
+                    Message::Session {
+                        epoch,
+                        message: Box::new(message),
+                    }
+                } else {
+                    message
                 });
             }));
         }
@@ -353,6 +462,34 @@ fn execute_with_context(
 ) -> Message {
     match request {
         Request::UseSession { .. } => unreachable!("session control is dispatched synchronously"),
+        Request::SaveProxy { id, proxy } => Message::ProxySaved {
+            id,
+            result: settings
+                .lock()
+                .expect("settings lock")
+                .set_proxy(&proxy)
+                .map_err(error_text),
+        },
+        Request::CheckUpdates { id, mode } => Message::UpdateChecked {
+            id,
+            result: app(config).update_service.check(mode).map_err(error_text),
+        },
+        Request::SaveUpdateChecks(enabled) => Message::UpdateChecksSaved {
+            enabled,
+            result: settings
+                .lock()
+                .expect("settings lock")
+                .set_update_checks(enabled)
+                .map_err(error_text),
+        },
+        Request::SaveUserAgent { id, value } => Message::UserAgentSaved {
+            id,
+            result: settings
+                .lock()
+                .expect("settings lock")
+                .set_user_agent(&value)
+                .map_err(error_text),
+        },
         Request::Authenticate { id, credential } => Message::Authenticated {
             id,
             result: authenticate(credential, config, settings).map_err(error_text),
@@ -396,6 +533,32 @@ fn execute_with_context(
                     .map_err(error_text);
             Message::Directory { id, result }
         }
+        Request::EntryDate {
+            id,
+            location,
+            directory,
+        } => {
+            let result =
+                SeafileClient::with_request_timeout(config.clone(), Duration::from_secs(15))
+                    .entry_updated_at(&location.repo_id, &location.path, directory)
+                    .map_err(error_text);
+            Message::EntryDate {
+                id,
+                location,
+                result,
+            }
+        }
+        Request::LibraryIndex {
+            id,
+            repo_id,
+            cancel,
+        } => Message::LibraryIndex {
+            id,
+            result: SeafileClient::with_request_timeout(config.clone(), Duration::from_secs(30))
+                .list_library_entries(&repo_id, &cancel)
+                .map(|entries| entries.into_iter().map(ListItem::from).collect())
+                .map_err(error_text),
+        },
         Request::Shares { id } => Message::Shares {
             id,
             result: app(config)
@@ -789,6 +952,43 @@ mod tests {
         assert!(
             matches!(receiver.try_recv(), Ok(Message::Session { message, .. }) if matches!(*message, Message::LanguageSaved { result: Ok(()), .. }))
         );
+        backend.dispatch(Request::SaveUserAgent {
+            id: 4,
+            value: "ExampleClient/2.0".into(),
+        });
+        assert_eq!(
+            backend
+                .settings
+                .lock()
+                .unwrap()
+                .view()
+                .user_agent
+                .as_deref(),
+            Some("ExampleClient/2.0")
+        );
+        assert!(
+            matches!(receiver.try_recv(), Ok(Message::Session { message, .. }) if matches!(&*message, Message::UserAgentSaved { id: 4, result: Ok(Some(value)) } if value == "ExampleClient/2.0"))
+        );
+        backend.dispatch(Request::SaveProxy {
+            id: 8,
+            proxy: ProxyConfig::Direct,
+        });
+        assert_eq!(
+            backend.settings.lock().unwrap().view().proxy,
+            ProxyConfig::Direct
+        );
+        assert!(
+            matches!(receiver.try_recv(), Ok(Message::Session { message, .. }) if matches!(*message, Message::ProxySaved { id: 8, result: Ok(ProxyConfig::Direct) }))
+        );
+        backend.pending.push_back(Request::CheckUpdates {
+            id: 6,
+            mode: CheckMode::Cached,
+        });
+        backend.dispatch(Request::SaveUpdateChecks(false));
+        assert!(!backend.settings.lock().unwrap().view().check_updates);
+        assert!(
+            matches!(receiver.try_recv(), Ok(Message::Session { message, .. }) if matches!(*message, Message::UpdateChecksSaved { enabled: false, result: Ok(()) }))
+        );
         backend.dispatch(Request::SignOut { id: 5 });
         assert!(
             matches!(receiver.try_recv(), Ok(Message::Session { message, .. }) if matches!(*message, Message::SignedOut { id: 5, result: Ok(_), .. }))
@@ -891,6 +1091,27 @@ mod tests {
         for worker in backend.workers.drain(..) {
             worker.join().unwrap();
         }
+    }
+
+    #[test]
+    fn public_update_checks_do_not_use_account_session_messages() {
+        let (sender, receiver) = mpsc::channel();
+        let mut backend = Backend::new(sender, true);
+        backend.dispatch(Request::CheckUpdates {
+            id: 7,
+            mode: CheckMode::Refresh,
+        });
+        backend.dispatch(Request::UseSession {
+            epoch: 3,
+            token: Some(SecretToken::new("private-token".into())),
+        });
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(3)),
+            Ok(Message::UpdateChecked {
+                id: 7,
+                result: Ok(_)
+            })
+        ));
     }
 
     #[test]

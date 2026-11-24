@@ -9,9 +9,12 @@ use serde::Serialize;
 use crate::{
     config::ConfigManager,
     contract::RemoteRef,
+    local_paths::default_download_directory,
     seafile::{DownloadAuth, SeafileClient},
     transfer::{ConflictPolicy, DownloadMode, ProgressMode},
 };
+
+use super::directory_download::{self, DirectorySource, DirectoryTarget, validate_name};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PullResult {
@@ -26,6 +29,7 @@ pub struct PullResult {
     pub bytes_written: u64,
     pub overwritten: bool,
     pub uniquified: bool,
+    pub is_directory: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,16 +59,13 @@ impl PullService {
         } else {
             None
         };
-        let requested_destination = match (local, target.as_ref()) {
-            (Some(local), _) => local.to_path_buf(),
-            (None, Some(target)) => PathBuf::from(&target.remote_name),
+        let mut destination = match (local, target.as_ref()) {
+            (Some(local), Some(target)) => resolve_local_destination(local, &target.remote_name)?,
+            (Some(local), None) => local.to_path_buf(),
+            (None, Some(target)) => default_download_directory()?.join(&target.remote_name),
             (None, None) => {
                 unreachable!("remote name is required when local destination is omitted")
             }
-        };
-        let mut destination = match target.as_ref() {
-            Some(target) => resolve_local_destination(&requested_destination, &target.remote_name)?,
-            None => requested_destination.clone(),
         };
         let requested_local_path = destination.display().to_string();
         let mut overwritten = false;
@@ -102,29 +103,44 @@ impl PullService {
             None => self.resolve_download_target(remote, from_share)?,
         };
 
-        let temp_path = temporary_download_path(&destination)?;
-        let bytes_written = self.client.download_file(
-            &target.download_link,
-            &temp_path,
-            download_mode,
-            workers,
-            progress_mode,
-            target.auth,
-        )?;
-        if overwritten && destination.exists() {
-            std::fs::remove_file(&destination).with_context(|| {
-                format!(
-                    "failed to remove existing destination before overwrite: {}",
-                    destination.display()
-                )
-            })?;
-        }
-        std::fs::rename(&temp_path, &destination).with_context(|| {
-            format!(
-                "failed to move downloaded file into place: {}",
-                destination.display()
-            )
-        })?;
+        let is_directory = matches!(target.content, DownloadContent::Directory(_));
+        let bytes_written = match &target.content {
+            DownloadContent::File { link, auth } => {
+                let temp_path = temporary_download_path(&destination)?;
+                let bytes = self.client.download_file(
+                    link,
+                    &temp_path,
+                    download_mode,
+                    workers,
+                    progress_mode,
+                    *auth,
+                )?;
+                if overwritten && destination.exists() {
+                    std::fs::remove_file(&destination).with_context(|| {
+                        format!(
+                            "failed to remove existing destination before overwrite: {}",
+                            destination.display()
+                        )
+                    })?;
+                }
+                std::fs::rename(&temp_path, &destination).with_context(|| {
+                    format!(
+                        "failed to move downloaded file into place: {}",
+                        destination.display()
+                    )
+                })?;
+                bytes
+            }
+            DownloadContent::Directory(directory) => directory_download::download(
+                &self.client,
+                directory,
+                &destination,
+                download_mode,
+                workers,
+                progress_mode,
+                overwritten,
+            )?,
+        };
 
         Ok(PullResult {
             source: target.source,
@@ -138,6 +154,7 @@ impl PullService {
             bytes_written,
             overwritten,
             uniquified,
+            is_directory,
         })
     }
 
@@ -147,34 +164,115 @@ impl PullService {
         from_share: bool,
     ) -> Result<ResolvedDownloadTarget> {
         if let Some(shared) = parse_share_ref(remote, from_share)? {
-            let shared_file = self.client.inspect_shared_file(&shared.token)?;
+            if shared.directory == Some(true) {
+                return self.resolve_shared_directory(&shared.token);
+            }
+            let shared_file = match self.client.inspect_shared_file(&shared.token) {
+                Ok(file) => file,
+                Err(error) if shared.directory.is_none() && directory_lookup_error(&error) => {
+                    return self.resolve_shared_directory(&shared.token);
+                }
+                Err(error) => return Err(error),
+            };
+            validate_name(&shared_file.file_name)?;
             return Ok(ResolvedDownloadTarget {
                 source: format!("share:{}", shared.token),
                 repo: "share".to_string(),
                 remote_path: format!("/{}", shared_file.file_name),
                 remote_name: shared_file.file_name,
-                download_link: shared_file.download_link,
-                auth: DownloadAuth::Optional,
+                content: DownloadContent::File {
+                    link: shared_file.download_link,
+                    auth: DownloadAuth::Optional,
+                },
             });
         }
 
         let resolved_config = self.config.load_resolved()?;
-        let remote = RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?;
+        let directory_hint = remote.trim_end().ends_with('/');
+        let remote = if remote.trim_start().starts_with("repo:") {
+            RemoteRef::parse_list_target(
+                remote.trim().trim_end_matches('/'),
+                resolved_config.default_repo.as_deref(),
+            )?
+        } else {
+            RemoteRef::parse(remote, resolved_config.default_repo.as_deref())?
+        };
         let repositories = self.client.list_repositories()?;
         let resolved = self.client.resolve_remote_ref(&remote, &repositories)?;
-        let download_link = self
-            .client
-            .get_download_link(&resolved.repo_id, &resolved.path)?;
+        let remote_name = resolved
+            .path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&resolved.repo_name)
+            .to_string();
+        validate_name(&remote_name)?;
+        let file_link = if directory_hint || resolved.path == "/" {
+            None
+        } else {
+            match self
+                .client
+                .get_download_link(&resolved.repo_id, &resolved.path)
+            {
+                Ok(link) => Some(link),
+                Err(error) if directory_lookup_error(&error) => None,
+                Err(error) => return Err(error),
+            }
+        };
+        let content = match file_link {
+            Some(link) => DownloadContent::File {
+                link,
+                auth: DownloadAuth::Required,
+            },
+            None => {
+                let entries = self.client.list_directory_entries_with_time(
+                    &resolved.repo_id,
+                    &resolved.path,
+                    false,
+                )?;
+                DownloadContent::Directory(DirectoryTarget {
+                    source: DirectorySource::Repository {
+                        repo_id: resolved.repo_id,
+                        path: resolved.path.clone(),
+                    },
+                    entries,
+                })
+            }
+        };
 
         Ok(ResolvedDownloadTarget {
             source: format!("repo:{}{}", resolved.repo_name, resolved.path),
             repo: resolved.repo_name,
             remote_path: resolved.path,
-            remote_name: remote_filename(&remote.path)?.to_string(),
-            download_link,
-            auth: DownloadAuth::Required,
+            remote_name,
+            content,
         })
     }
+
+    fn resolve_shared_directory(&self, token: &str) -> Result<ResolvedDownloadTarget> {
+        let directory = self.client.list_shared_directory(token, "/")?;
+        let name = directory.name.unwrap_or_else(|| format!("share-{token}"));
+        validate_name(&name)?;
+        Ok(ResolvedDownloadTarget {
+            source: format!("share:{token}"),
+            repo: "share".into(),
+            remote_path: format!("/{name}"),
+            remote_name: name,
+            content: DownloadContent::Directory(DirectoryTarget {
+                source: DirectorySource::Shared {
+                    token: token.into(),
+                },
+                entries: directory.entries,
+            }),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DownloadContent {
+    File { link: String, auth: DownloadAuth },
+    Directory(DirectoryTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,13 +281,13 @@ struct ResolvedDownloadTarget {
     repo: String,
     remote_path: String,
     remote_name: String,
-    download_link: String,
-    auth: DownloadAuth,
+    content: DownloadContent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShareRef {
     token: String,
+    directory: Option<bool>,
 }
 
 fn parse_share_ref(input: &str, from_share: bool) -> Result<Option<ShareRef>> {
@@ -199,12 +297,20 @@ fn parse_share_ref(input: &str, from_share: bool) -> Result<Option<ShareRef>> {
     }
 
     if let Some(token) = parse_share_url(trimmed)? {
-        return Ok(Some(ShareRef { token }));
+        let directory = url::Url::parse(trimmed)?
+            .path()
+            .trim_start_matches('/')
+            .starts_with("d/");
+        return Ok(Some(ShareRef {
+            token,
+            directory: Some(directory),
+        }));
     }
 
     if from_share {
         return Ok(Some(ShareRef {
             token: parse_share_token(trimmed)?,
+            directory: None,
         }));
     }
 
@@ -259,9 +365,23 @@ fn parse_share_token(input: &str) -> Result<String> {
 fn resolve_local_destination(local: &Path, remote_path: &str) -> Result<PathBuf> {
     if local.exists() && local.is_dir() {
         let name = remote_filename(remote_path)?;
+        validate_name(name)?;
         return Ok(local.join(name));
     }
     Ok(local.to_path_buf())
+}
+
+fn directory_lookup_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .filter_map(reqwest::Error::status)
+        .any(|status| {
+            matches!(
+                status,
+                reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+            )
+        })
 }
 
 fn remote_filename(remote_path: &str) -> Result<&str> {
@@ -441,11 +561,19 @@ mod tests {
             repo: "course-lib".to_string(),
             remote_path: "/slides/week1.pdf".to_string(),
             remote_name: "week1.pdf".to_string(),
-            download_link: "https://cloud.tsinghua.edu.cn/seafhttp/files/example".to_string(),
-            auth: crate::seafile::DownloadAuth::Required,
+            content: super::DownloadContent::File {
+                link: "https://cloud.tsinghua.edu.cn/seafhttp/files/example".to_string(),
+                auth: crate::seafile::DownloadAuth::Required,
+            },
         };
 
-        assert_eq!(target.auth, crate::seafile::DownloadAuth::Required);
+        assert!(matches!(
+            target.content,
+            super::DownloadContent::File {
+                auth: crate::seafile::DownloadAuth::Required,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -455,10 +583,18 @@ mod tests {
             repo: "share".to_string(),
             remote_path: "/week1.pdf".to_string(),
             remote_name: "week1.pdf".to_string(),
-            download_link: "https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1".to_string(),
-            auth: crate::seafile::DownloadAuth::Optional,
+            content: super::DownloadContent::File {
+                link: "https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1".to_string(),
+                auth: crate::seafile::DownloadAuth::Optional,
+            },
         };
 
-        assert_eq!(target.auth, crate::seafile::DownloadAuth::Optional);
+        assert!(matches!(
+            target.content,
+            super::DownloadContent::File {
+                auth: crate::seafile::DownloadAuth::Optional,
+                ..
+            }
+        ));
     }
 }

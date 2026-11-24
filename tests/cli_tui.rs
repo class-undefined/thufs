@@ -53,7 +53,9 @@ fn tui_help_describes_settings_and_token_login_without_the_old_slash_prompt() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Ctrl+P"))
-        .stdout(predicate::str::contains("language and account settings"))
+        .stdout(predicate::str::contains(
+            "language, User-Agent, and account settings",
+        ))
         .stdout(predicate::str::contains("Sign in with a token"))
         .stdout(predicate::str::contains("Press / for commands").not());
 }

@@ -1,10 +1,12 @@
 pub mod account_service;
 pub mod auth_service;
 pub mod create_service;
+mod directory_download;
 pub mod list_service;
 pub mod pull_service;
 pub mod push_service;
 pub mod share_service;
+pub mod update_service;
 
 use crate::{config::ConfigManager, output::Renderer, seafile::SeafileClient};
 
@@ -25,6 +27,7 @@ pub struct App {
     pub push_service: PushService,
     pub pull_service: PullService,
     pub share_service: ShareService,
+    pub update_service: update_service::UpdateService,
 }
 
 impl App {
@@ -49,6 +52,7 @@ impl App {
             push_service: PushService::new(config.clone(), seafile.clone()),
             pull_service: PullService::new(config.clone(), seafile.clone()),
             share_service: ShareService::new(config.clone(), seafile.clone()),
+            update_service: update_service::UpdateService::new(config),
         }
     }
 }

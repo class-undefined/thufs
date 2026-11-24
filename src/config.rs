@@ -8,6 +8,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::network::ProxyConfig;
+
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -15,6 +17,22 @@ const CONFIG_DIR_ENV: &str = "THUFS_CONFIG_DIR";
 const TOKEN_ENV: &str = "THUFS_TOKEN";
 const DEFAULT_REPO_ENV: &str = "THUFS_DEFAULT_REPO";
 const OUTPUT_ENV: &str = "THUFS_OUTPUT";
+
+pub const DEFAULT_USER_AGENT: &str = concat!(
+    "thufs/",
+    env!("CARGO_PKG_VERSION"),
+    " (+",
+    env!("CARGO_PKG_REPOSITORY"),
+    ")"
+);
+
+pub fn normalize_user_agent(value: &str) -> Result<Option<String>> {
+    if !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control()) {
+        bail!("User-Agent must contain printable ASCII characters only.");
+    }
+    let value = value.trim();
+    Ok((!value.is_empty()).then(|| value.to_string()))
+}
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -54,6 +72,10 @@ pub struct Config {
     pub default_repo: Option<String>,
     #[serde(default)]
     pub output: OutputMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 impl Default for Config {
@@ -62,7 +84,15 @@ impl Default for Config {
             token: None,
             default_repo: None,
             output: OutputMode::Human,
+            user_agent: None,
+            proxy: ProxyConfig::Auto,
         }
+    }
+}
+
+impl Config {
+    pub fn effective_user_agent(&self) -> &str {
+        self.user_agent.as_deref().unwrap_or(DEFAULT_USER_AGENT)
     }
 }
 
@@ -184,8 +214,14 @@ impl ConfigManager {
         let raw = fs::read_to_string(&self.path)
             .with_context(|| format!("failed to read config file {}", self.path.display()))?;
 
-        let config = serde_json::from_str::<Config>(&raw)
+        let mut config = serde_json::from_str::<Config>(&raw)
             .with_context(|| format!("failed to parse config file {}", self.path.display()))?;
+        config.user_agent = normalize_user_agent(config.user_agent.as_deref().unwrap_or_default())
+            .context("invalid User-Agent in config file")?;
+        config.proxy = config
+            .proxy
+            .normalized()
+            .context("invalid proxy in config file")?;
 
         Ok(config)
     }
@@ -196,14 +232,31 @@ impl ConfigManager {
         self.write_config(&config)
     }
 
+    pub fn set_user_agent(&self, value: &str) -> Result<()> {
+        let user_agent = normalize_user_agent(value)?;
+        let mut config = self.load_file()?;
+        config.user_agent = user_agent;
+        self.write_config(&config)
+    }
+
+    pub fn set_proxy(&self, proxy: &ProxyConfig) -> Result<()> {
+        let proxy = proxy.normalized()?;
+        let mut config = self.load_file()?;
+        config.proxy = proxy;
+        self.write_config(&config)
+    }
+
     pub fn write_config(&self, config: &Config) -> Result<()> {
+        let mut config = config.clone();
+        config.user_agent = normalize_user_agent(config.user_agent.as_deref().unwrap_or_default())?;
+        config.proxy = config.proxy.normalized()?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create config directory {}", parent.display())
             })?;
         }
 
-        let raw = serde_json::to_string_pretty(config)?;
+        let raw = serde_json::to_string_pretty(&config)?;
 
         let mut options = fs::OpenOptions::new();
         options.create(true).truncate(true).write(true);
@@ -269,6 +322,8 @@ mod tests {
                 token: Some("file-token".to_string()),
                 default_repo: Some("file-repo".to_string()),
                 output: OutputMode::Human,
+                user_agent: None,
+                proxy: crate::network::ProxyConfig::Auto,
             })
             .expect("write config");
 
@@ -333,6 +388,8 @@ mod tests {
                 token: Some("file-token".to_string()),
                 default_repo: Some("file-repo".to_string()),
                 output: OutputMode::Human,
+                user_agent: None,
+                proxy: crate::network::ProxyConfig::Auto,
             })
             .expect("write config");
 
@@ -369,5 +426,53 @@ mod tests {
             err.to_string().contains("unsupported output mode"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn user_agent_persists_resets_and_preserves_other_configuration() {
+        let temp = tempdir().unwrap();
+        let manager = ConfigManager::from_path(temp.path().join("config.json"));
+        manager.set_token("existing-token").unwrap();
+        let original = manager.load_file().unwrap();
+        assert_eq!(original.effective_user_agent(), super::DEFAULT_USER_AGENT);
+        assert!(super::DEFAULT_USER_AGENT.starts_with("thufs/"));
+        manager
+            .set_user_agent("  ExampleClient/2.0 (custom)  ")
+            .unwrap();
+        let updated = manager.load_file().unwrap();
+        assert_eq!(updated.effective_user_agent(), "ExampleClient/2.0 (custom)");
+        assert_eq!(updated.token, original.token);
+        assert_eq!(updated.output, original.output);
+        assert_eq!(updated.default_repo, original.default_repo);
+        manager.set_user_agent("  ").unwrap();
+        assert_eq!(manager.load_file().unwrap(), original);
+        assert!(
+            !fs::read_to_string(manager.path())
+                .unwrap()
+                .contains("user_agent")
+        );
+    }
+
+    #[test]
+    fn invalid_user_agents_cannot_change_the_saved_configuration_or_build_headers() {
+        let temp = tempdir().unwrap();
+        let manager = ConfigManager::from_path(temp.path().join("config.json"));
+        manager.set_user_agent("ExampleClient/1.0").unwrap();
+        let original = fs::read(manager.path()).unwrap();
+        for value in [
+            "custom\r\nInjected: value",
+            "custom\0value",
+            "custom\tvalue",
+            "中文",
+        ] {
+            assert!(manager.set_user_agent(value).is_err());
+            assert_eq!(fs::read(manager.path()).unwrap(), original);
+            let mut config = Config::default();
+            config.user_agent = Some(value.into());
+            assert!(manager.write_config(&config).is_err());
+            fs::write(manager.path(), serde_json::to_vec(&config).unwrap()).unwrap();
+            assert!(manager.load_file().is_err());
+            fs::write(manager.path(), &original).unwrap();
+        }
     }
 }

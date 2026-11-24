@@ -10,6 +10,7 @@ fn download_help_is_available() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Download a remote file"))
+        .stdout(predicate::str::contains("directory"))
         .stdout(predicate::str::contains("--share"))
         .stdout(predicate::str::contains("--conflict"))
         .stdout(predicate::str::contains("--mode"))
@@ -87,6 +88,7 @@ fn download_share_hash_with_flag_reaches_share_flow() {
         .failure()
         .stderr(
             predicate::str::contains("failed to inspect shared file")
-                .or(predicate::str::contains("shared file")),
+                .or(predicate::str::contains("shared file"))
+                .or(predicate::str::contains("shared directory")),
         );
 }

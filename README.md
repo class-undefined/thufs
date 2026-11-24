@@ -1,3 +1,7 @@
+![thufs TUI：本机 iTerm2 终端实拍（离线演示）](./docs/assets/tui-terminal.png)
+
+*本机 iTerm2 中运行 `cargo run --locked -- tui --demo` 的实拍截图，使用内置示例数据，不展示真实账号信息。*
+
 # thufs
 
 [![GitHub stars](https://img.shields.io/github/stars/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/stargazers)
@@ -18,13 +22,14 @@
 ## 项目目标
 
 - 面向清华云盘日常用户，尤其是依赖终端和脚本的人群
-- 聚焦单文件上传、下载、列目录、分享链接等核心能力
+- 聚焦单文件上传、文件与目录下载、列目录、分享链接等核心能力
 - 保持 Unix 风格的扁平命令接口，便于组合和自动化
 - 默认提供人类可读输出，同时支持 `--json` 供脚本消费
 
 ## 功能特性
 
 - `tui` 交互式云盘工作区，支持命令面板、文件浏览、传输队列和分享管理
+- TUI 后台检测新版本，关于页支持手动检查，CLI 提供 `update check`
 - `info` 查看当前 token 对应的账号信息
 - `repos` 或 `libraries` 查看当前可见的仓库或资料库
 - `ls` 查看远程目录内容，支持 repo 根目录
@@ -89,6 +94,22 @@ export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
 cargo run -- --help
 ```
 
+## 更新检测
+
+TUI 启动时在后台检查 GitHub 最新稳定 Release，结果缓存 24 小时。
+按 `5` 打开关于页，点击“检查更新”或按 `u` 立即重新检查；发现新版本后按 `Enter` 查看发布链接和更新命令。
+设置页的“自动检测更新”可以关闭启动检测，手动检查仍可使用。
+
+```bash
+thufs update check
+thufs update check --force
+thufs --json update check
+```
+
+`--force` 跳过缓存，立即联网查询。CLI 的普通文件操作保持原有输出，只有显式执行 `update check` 才会检测。
+检测失败不会影响 TUI 文件操作；演示模式使用离线示例。
+确认更新后，可从发布页获取预编译包，或运行 `cargo install thufs --locked --force`。
+
 ## 认证与配置
 
 `thufs` 当前采用 token 驱动，不实现用户名密码登录，也不处理浏览器 OAuth 流程。你需要先从外部获取可用的 Seafile API token。
@@ -134,6 +155,23 @@ thufs --json config show
 
 TUI 的语言和已保存账号另存于同目录的 `tui.json`。
 在 TUI 中显式选择的账号优先于 `THUFS_TOKEN`；CLI 继续按上述规则读取配置。
+
+默认 HTTP User-Agent 为 `thufs/<版本> (+https://github.com/class-undefined/thufs)`。
+可在 TUI 设置页编辑 `User-Agent`，留空恢复默认；保存到 `config.json` 的 `user_agent`，TUI 和 CLI 共用。`thufs config show` 可查看当前生效值。
+
+TUI 设置页的“代理”提供三种模式：自动检测、手动指定和直连。修改后保存到 `config.json`，云盘操作、上传下载和更新检测共用，之后新建的请求生效。
+自动模式读取 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`（含小写形式），没有有效环境变量代理时读取 macOS / Windows 的系统静态 HTTP、HTTPS 代理；Linux 使用环境变量。支持 `NO_PROXY` / `no_proxy` 绕过指定目标。
+手动模式支持 `http://`、`https://`、`socks5://` 和 `socks5h://`，其中 `socks5h` 通过代理解析目标域名；直连模式关闭所有代理。
+系统 PAC / WPAD 脚本暂不解析，可填写手动代理地址。
+
+```bash
+thufs config proxy auto
+thufs config proxy manual http://127.0.0.1:7890
+thufs config proxy manual socks5h://127.0.0.1:1080
+thufs config proxy direct
+```
+
+`thufs config proxy detect` 等同于启用自动检测；`thufs config show` 展示的代理地址会隐藏认证信息。
 
 ## 远程路径规则
 
@@ -204,14 +242,14 @@ thufs tui --local ~/Downloads
 cargo run --locked -- tui
 ```
 
-![thufs TUI 离线演示：资料库、文件列表和详情栏](./docs/assets/tui-files.png)
-
 按 `Ctrl+P` 打开命令面板；终端可转发时也支持 `Cmd+P`。
-按 `1`、`2`、`3`、`4` 切换文件、传输、分享和设置。
+按 `1`、`2`、`3`、`4`、`5` 切换文件、传输、分享、设置和关于。
 支持方向键和 `j/k/h/l` 导航，`Space` 多选文件，`u` 上传、`d` 下载、`s` 创建分享。
-设置页支持中英文切换、Token 登录、保存账号和切换账号。
+设置页分为界面、网络、版本更新和账号四类，分别管理语言、代理与 User-Agent、更新检测、登录与账号切换。
+点击分类标签或按 `Tab` / `Shift+Tab` 切换，用上下键选择选项、`Enter` 修改。
+文件和分享列表上方提供搜索框，支持单击或 `Ctrl+F` / `f` 聚焦；文件搜索覆盖整个资料库及子目录，分享搜索支持路径、链接和分享码。分享文件和目录均可按 `d` 下载。
 上传选择器支持路径输入、`Tab` 补全和通配符匹配，`Ctrl+A` 可选择全部匹配文件，再确认上传。
-下载同样提供目录选择器，支持浏览、路径输入和补全，再确认保存位置。
+下载同样提供目录选择器，默认打开当前用户的 `~/Downloads`（不存在时自动创建），支持浏览、路径输入和补全，再确认保存位置。`--local` 可覆盖初始上传位置和默认下载位置。
 确认表单的本地路径右侧有“浏览…”按钮，也可用 `Ctrl+B` / `F4` 打开支持鼠标的 TUI 文件对话框。
 按 `?` 查看帮助。
 
@@ -275,7 +313,7 @@ thufs mkdir repo:course-lib/slides/week1
 thufs mkdir submissions/week1
 ```
 
-### 下载文件
+### 下载文件或目录
 
 ```bash
 thufs download repo:course-lib/slides/week1.pdf
@@ -286,12 +324,18 @@ thufs download "https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1"
 thufs download --share abc123XYZ_
 thufs download --mode sequential repo:course-lib/slides/week1.pdf
 thufs download --mode parallel --workers 8 repo:course-lib/slides/week1.pdf
+thufs download repo:course-lib/slides/
+thufs download repo:course-lib
+thufs download https://cloud.tsinghua.edu.cn/d/abc123XYZ_/
 ```
 
 说明：
 
-- 如果不写本地路径，默认保存到当前目录，并使用远程文件名
+- 如果不写本地路径，默认保存到当前用户的 `~/Downloads`，并使用远程文件名；目录不存在时自动创建
 - 如果本地路径是已存在目录，则下载到该目录下并沿用远程文件名
+- 目录下载会递归保留子目录、空目录和文件名；默认保存为 `~/Downloads/<目录名>`，也可下载整个资料库
+- 目录重名默认自动改名；`--conflict fail` 拒绝覆盖，`--conflict overwrite` 合并目录并覆盖同名文件，保留无关文件
+- 支持 `/d/<分享码>/` 目录分享链接；未完成的目录下载保留临时目录，重试时复用已完成文件并尝试续传
 - 也支持分享文件下载：可直接传完整分享链接，`?dl=1` 这类查询参数会被忽略，只提取其中的 token；或使用 `--share <hashcode>`
 - 分享下载会根据当前登录状态决定身份：已配置 token 时会携带登录身份，未登录时按匿名下载处理，便于访问需要身份授权的分享链接
 - `pull` 是 `download` 的兼容别名
@@ -448,7 +492,7 @@ thufs download repo:course-lib/slides/week1.pdf ./week1.pdf --progress jsonl
 `thufs` 当前刻意不覆盖以下方向：
 
 - 完整双向同步
-- 递归目录上传或下载
+- 递归目录上传
 - CLI 多账号命名配置（TUI 支持保存和切换账号）
 - 任意 Seafile 实例的通用化接入
 - GUI 或桌面常驻同步体验

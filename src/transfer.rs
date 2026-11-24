@@ -45,6 +45,10 @@ enum ProgressReporterInner {
     None,
     Bar(ProgressBar),
     Jsonl(Mutex<JsonlProgressState>),
+    Offset {
+        parent: ProgressReporter,
+        offset: u64,
+    },
 }
 
 struct JsonlProgressState {
@@ -199,6 +203,15 @@ fn create_progress_bar(total: Option<u64>) -> Option<ProgressBar> {
 }
 
 impl ProgressReporter {
+    pub fn with_offset(&self, offset: u64) -> Self {
+        Self {
+            inner: Arc::new(ProgressReporterInner::Offset {
+                parent: self.clone(),
+                offset,
+            }),
+        }
+    }
+
     pub fn none() -> Self {
         Self {
             inner: Arc::new(ProgressReporterInner::None),
@@ -250,6 +263,9 @@ impl ProgressReporter {
             ProgressReporterInner::Jsonl(_) => {
                 self.emit_jsonl("progress", ProgressUpdate::Set(transferred_bytes))
             }
+            ProgressReporterInner::Offset { parent, offset } => {
+                parent.set_position(offset.saturating_add(transferred_bytes))
+            }
         }
     }
 
@@ -263,6 +279,7 @@ impl ProgressReporter {
             ProgressReporterInner::Jsonl(_) => {
                 self.emit_jsonl("progress", ProgressUpdate::Add(delta))
             }
+            ProgressReporterInner::Offset { parent, .. } => parent.inc(delta),
         }
     }
 
@@ -276,6 +293,7 @@ impl ProgressReporter {
             ProgressReporterInner::Jsonl(_) => {
                 self.emit_jsonl("progress-finished", ProgressUpdate::Keep)
             }
+            ProgressReporterInner::Offset { .. } => Ok(()),
         }
     }
 
@@ -287,6 +305,7 @@ impl ProgressReporter {
                 Ok(())
             }
             ProgressReporterInner::Jsonl(_) => self.finish(),
+            ProgressReporterInner::Offset { .. } => Ok(()),
         }
     }
 
@@ -299,6 +318,7 @@ impl ProgressReporter {
                 Ok(())
             }
             ProgressReporterInner::Jsonl(_) => self.emit_jsonl_warning(&message),
+            ProgressReporterInner::Offset { parent, .. } => parent.warning(message),
         }
     }
 
@@ -439,6 +459,35 @@ mod tests {
         assert!(lines[2].contains("\"transferred_bytes\":10"));
         assert!(lines[2].contains("\"percent\":50.0"));
         assert!(lines[3].contains("\"event\":\"progress-finished\""));
+    }
+
+    #[test]
+    fn directory_progress_offsets_file_streams_and_only_finishes_once() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let reporter =
+            ProgressReporter::jsonl(SharedWriter(output.clone()), "download", "folder", Some(20));
+        reporter.started().unwrap();
+        reporter.set_position(5).unwrap();
+        let child = reporter.with_offset(5);
+        child.set_position(3).unwrap();
+        child.inc(2).unwrap();
+        child.finish_with_message("file finished").unwrap();
+        reporter.finish().unwrap();
+        let rendered = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let events: Vec<serde_json::Value> = rendered
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "progress-finished")
+                .count(),
+            1
+        );
+        assert_eq!(events[2]["transferred_bytes"], 8);
+        assert_eq!(events.last().unwrap()["transferred_bytes"], 10);
+        assert_eq!(events.last().unwrap()["total_bytes"], 20);
     }
 
     #[test]

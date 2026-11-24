@@ -9,7 +9,11 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::i18n::Language;
-use crate::{app::account_service::AccountInfoResult, config::ConfigManager};
+use crate::{
+    app::account_service::AccountInfoResult,
+    config::{ConfigManager, normalize_user_agent},
+    network::ProxyConfig,
+};
 
 const ENVIRONMENT: &str = "@environment";
 const CLI_CONFIG: &str = "@config";
@@ -47,6 +51,7 @@ pub struct Preferences {
     pub language: Language,
     pub active_account: Option<String>,
     pub accounts: Vec<SavedAccount>,
+    pub check_updates: bool,
 }
 
 impl Default for Preferences {
@@ -55,6 +60,7 @@ impl Default for Preferences {
             language: Language::detect(),
             active_account: None,
             accounts: Vec::new(),
+            check_updates: true,
         }
     }
 }
@@ -71,6 +77,9 @@ pub struct SettingsView {
     pub language: Language,
     pub active_account: Option<String>,
     pub accounts: Vec<AccountChoice>,
+    pub user_agent: Option<String>,
+    pub check_updates: bool,
+    pub proxy: ProxyConfig,
 }
 
 pub enum Credential {
@@ -89,6 +98,9 @@ pub struct SettingsStore {
     preferences: Preferences,
     environment: Option<SecretToken>,
     cli_token: Option<SecretToken>,
+    config: Option<ConfigManager>,
+    user_agent: Option<String>,
+    proxy: ProxyConfig,
 }
 
 impl SettingsStore {
@@ -107,6 +119,9 @@ impl SettingsStore {
             preferences,
             environment: nonempty(overrides.token),
             cli_token: nonempty(file.token),
+            config: Some(config.clone()),
+            user_agent: file.user_agent,
+            proxy: file.proxy,
         })
     }
 
@@ -116,6 +131,9 @@ impl SettingsStore {
             preferences: Preferences::default(),
             environment: None,
             cli_token: None,
+            config: None,
+            user_agent: None,
+            proxy: ProxyConfig::Auto,
         }
     }
 
@@ -148,6 +166,9 @@ impl SettingsStore {
             language: self.preferences.language,
             active_account: self.active_key(),
             accounts,
+            user_agent: self.user_agent.clone(),
+            check_updates: self.preferences.check_updates,
+            proxy: self.proxy.clone(),
         }
     }
 
@@ -230,6 +251,32 @@ impl SettingsStore {
         Ok(())
     }
 
+    pub fn set_user_agent(&mut self, value: &str) -> Result<Option<String>> {
+        let user_agent = normalize_user_agent(value)?;
+        if let Some(config) = &self.config {
+            config.set_user_agent(value)?;
+        }
+        self.user_agent = user_agent;
+        Ok(self.user_agent.clone())
+    }
+
+    pub fn set_update_checks(&mut self, enabled: bool) -> Result<()> {
+        let mut next = self.preferences.clone();
+        next.check_updates = enabled;
+        self.persist(&next)?;
+        self.preferences = next;
+        Ok(())
+    }
+
+    pub fn set_proxy(&mut self, proxy: &ProxyConfig) -> Result<ProxyConfig> {
+        let proxy = proxy.normalized()?;
+        if let Some(config) = &self.config {
+            config.set_proxy(&proxy)?;
+        }
+        self.proxy = proxy;
+        Ok(self.proxy.clone())
+    }
+
     pub fn sign_out(&mut self) -> Result<SettingsView> {
         let mut next = self.preferences.clone();
         next.active_account = Some(SIGNED_OUT.into());
@@ -303,6 +350,9 @@ mod tests {
             },
             environment: Some(SecretToken::new("environment-secret".into())),
             cli_token: Some(SecretToken::new("cli-secret".into())),
+            config: Some(ConfigManager::from_path(temp.path().join("config.json"))),
+            user_agent: None,
+            proxy: ProxyConfig::Auto,
         };
         (temp, store)
     }
@@ -396,6 +446,85 @@ mod tests {
         restored.environment = Some(SecretToken::new("another-environment-secret".into()));
         assert!(restored.initial_token().is_none());
         assert_eq!(restored.view().language, Language::Chinese);
+    }
+
+    #[test]
+    fn user_agent_is_shared_with_cli_and_survives_language_and_account_changes() {
+        let (temp, mut store) = fixture();
+        let config = ConfigManager::from_path(temp.path().join("config.json"));
+        config.set_token("existing-cli-token").unwrap();
+        store.set_user_agent("ExampleClient/2.0").unwrap();
+        store.set_language(Language::Chinese).unwrap();
+        save(&mut store, "one@example.com", "saved-account-token");
+        store.sign_out().unwrap();
+        let mut restored = SettingsStore::open(&config).unwrap();
+        assert_eq!(
+            restored.view().user_agent.as_deref(),
+            Some("ExampleClient/2.0")
+        );
+        let file = config.load_file().unwrap();
+        assert_eq!(file.effective_user_agent(), "ExampleClient/2.0");
+        assert_eq!(file.token.as_deref(), Some("existing-cli-token"));
+        restored.set_user_agent("").unwrap();
+        assert!(
+            SettingsStore::open(&config)
+                .unwrap()
+                .view()
+                .user_agent
+                .is_none()
+        );
+
+        let unavailable = temp.path().join("not-a-directory");
+        fs::write(&unavailable, "data").unwrap();
+        store.config = Some(ConfigManager::from_path(unavailable.join("config.json")));
+        assert!(store.set_user_agent("OtherClient/3.0").is_err());
+        assert_eq!(
+            store.view().user_agent.as_deref(),
+            Some("ExampleClient/2.0")
+        );
+    }
+
+    #[test]
+    fn automatic_update_checks_default_on_for_older_preferences_and_can_be_disabled() {
+        let (temp, mut store) = fixture();
+        assert!(store.view().check_updates);
+        store.set_update_checks(false).unwrap();
+        let config = ConfigManager::from_path(temp.path().join("config.json"));
+        assert!(!SettingsStore::open(&config).unwrap().view().check_updates);
+        let legacy: Preferences =
+            serde_json::from_str(r#"{"accounts":[],"language":"en"}"#).unwrap();
+        assert!(legacy.check_updates);
+        let unavailable = temp.path().join("not-a-directory");
+        fs::write(&unavailable, "data").unwrap();
+        store.path = Some(unavailable.join("tui.json"));
+        assert!(store.set_update_checks(true).is_err());
+        assert!(!store.view().check_updates);
+    }
+
+    #[test]
+    fn proxy_preferences_persist_in_shared_config_without_changing_credentials() {
+        let (temp, mut store) = fixture();
+        let config = ConfigManager::from_path(temp.path().join("config.json"));
+        config.set_token("existing-token").unwrap();
+        let proxy =
+            ProxyConfig::from_input("manual", "socks5h://test-user:test-password@127.0.0.1:1080")
+                .unwrap();
+        store.set_proxy(&proxy).unwrap();
+        store.set_language(Language::Chinese).unwrap();
+        store.sign_out().unwrap();
+        assert_eq!(SettingsStore::open(&config).unwrap().view().proxy, proxy);
+        assert_eq!(
+            config.load_file().unwrap().token.as_deref(),
+            Some("existing-token")
+        );
+        let debug = format!("{:?}", store.view());
+        assert!(!debug.contains("test-user"));
+        assert!(!debug.contains("test-password"));
+        let blocked = temp.path().join("not-a-directory");
+        fs::write(&blocked, "data").unwrap();
+        store.config = Some(ConfigManager::from_path(blocked.join("config.json")));
+        assert!(store.set_proxy(&ProxyConfig::Direct).is_err());
+        assert_eq!(store.view().proxy, proxy);
     }
 
     #[test]

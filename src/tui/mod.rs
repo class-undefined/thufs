@@ -35,7 +35,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Position};
 
-use crate::config::ConfigManager;
+use crate::{config::ConfigManager, local_paths::default_download_directory};
 
 use self::{
     backend::Backend,
@@ -59,12 +59,21 @@ pub fn run(options: Options) -> Result<()> {
     if std::env::var("TERM").as_deref() == Ok("dumb") {
         bail!("tui requires a terminal with cursor control (TERM must not be dumb)");
     }
-    let local = options.local.unwrap_or(std::env::current_dir()?);
+    let use_default_download_directory = options.local.is_none();
+    let local = match options.local {
+        Some(local) => local,
+        None => std::env::current_dir()?,
+    };
     let local = std::fs::canonicalize(&local)
         .with_context(|| format!("Cannot open local directory {}", local.display()))?;
     if !local.is_dir() {
         bail!("--local must point to an existing directory");
     }
+    let download_directory = if use_default_download_directory {
+        default_download_directory()?
+    } else {
+        local.clone()
+    };
     let config = ConfigManager::new();
     let store = if options.demo {
         settings::SettingsStore::ephemeral()
@@ -79,8 +88,9 @@ pub fn run(options: Options) -> Result<()> {
         let config = config.load_resolved()?;
         options.remote.or(config.default_repo)
     };
-    let mut model = Model::new(local, initial_remote, options.demo);
+    let mut model = Model::new(local, download_directory, initial_remote, options.demo);
     model.configure_settings(view, initial_token.is_some());
+    model.check_for_updates(crate::app::update_service::CheckMode::Cached);
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore();
@@ -201,12 +211,28 @@ fn handle_mouse(
                     return;
                 }
             }
+            for (rect, category) in &hits.settings_categories {
+                if rect.contains(point) {
+                    *last_click = None;
+                    model.select_settings_category(*category);
+                    return;
+                }
+            }
+            if hits.search.contains(point) {
+                *last_click = None;
+                model.action(model::Action::Search);
+                return;
+            }
+            if hits.check_updates.contains(point) {
+                *last_click = None;
+                model.action(model::Action::CheckUpdates);
+                return;
+            }
             if hits.libraries.contains(point) {
                 model.focus = Focus::Libraries;
-                model.library_cursor = (hits.library_start
-                    + (mouse.row - hits.libraries.y) as usize)
-                    .min(model.repos.len().saturating_sub(1));
-                if double {
+                let index = hits.library_start + (mouse.row - hits.libraries.y) as usize;
+                if index < model.repos.len() {
+                    model.library_cursor = index;
                     model.open_library();
                 }
             } else if hits.files.contains(point) {
@@ -215,9 +241,16 @@ fn handle_mouse(
                     return;
                 }
                 let index = hits.list_start + ((row - hits.file_header) / hits.row_height) as usize;
+                model.filtering = false;
                 model.focus = Focus::Files;
                 match model.workspace {
-                    Workspace::Settings => model.settings_cursor = index.min(3),
+                    Workspace::About => {}
+                    Workspace::Settings => {
+                        if index >= model.settings_category.items().len() {
+                            return;
+                        }
+                        model.settings_cursor = index;
+                    }
                     Workspace::Files => {
                         model.cursor = index.min(model.file_indices().len().saturating_sub(1))
                     }

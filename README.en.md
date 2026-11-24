@@ -71,6 +71,22 @@ For local development:
 cargo run -- --help
 ```
 
+## Update Checks
+
+The TUI checks the latest stable GitHub Release in the background at startup and caches the result for 24 hours.
+Open About with `5`, then click **Check for updates** or press `u` to check online immediately. Press `Enter` after a check to see the release link and update command.
+Settings includes **Automatic update checks** to disable startup checks; manual checks remain available.
+
+```bash
+thufs update check
+thufs update check --force
+thufs --json update check
+```
+
+`--force` bypasses the cache. Other CLI operations keep their existing output and do not trigger update checks.
+Network errors do not interrupt TUI file operations, and demo mode uses offline fixtures.
+To install an available update, use the release assets or run `cargo install thufs --locked --force`.
+
 ## Authentication And Config
 
 `thufs` is token-driven. It does not implement username/password login or browser-based auth flows.
@@ -116,6 +132,23 @@ The model is file-first configuration with environment overrides for temporary s
 
 TUI language preferences and saved accounts live in `tui.json` alongside the CLI configuration.
 An account explicitly selected in the TUI takes priority over `THUFS_TOKEN` for that TUI session; CLI configuration behavior stays the same.
+
+HTTP requests use `thufs/<version> (+https://github.com/class-undefined/thufs)` as their default User-Agent.
+Edit `User-Agent` in TUI Settings to customize it, or leave it blank to restore the default. The `user_agent` field in `config.json` is shared by the TUI and CLI; `thufs config show` displays the effective value.
+
+**Proxy** in TUI Settings offers Auto, Manual, and Direct modes. Settings are stored in `config.json` and apply to subsequent cloud requests, transfers, and update checks.
+Auto reads `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` (including lowercase variants), then static HTTP/HTTPS system proxies on macOS and Windows when no valid environment proxy is found. Linux uses environment variables. `NO_PROXY` / `no_proxy` provides bypass rules.
+Manual accepts `http://`, `https://`, `socks5://`, and `socks5h://`; `socks5h` resolves destination names through the proxy. Direct disables all proxies.
+PAC / WPAD scripts are not evaluated; use a manual proxy address for those setups.
+
+```bash
+thufs config proxy auto
+thufs config proxy manual http://127.0.0.1:7890
+thufs config proxy manual socks5h://127.0.0.1:1080
+thufs config proxy direct
+```
+
+`thufs config proxy detect` also enables Auto. Proxy credentials are redacted in `thufs config show`.
 
 ## Remote Path Syntax
 
@@ -177,11 +210,13 @@ cargo run --locked -- tui
 ![thufs offline demo: libraries, file browser, and inspector](./docs/assets/tui-files.png)
 
 Press `Ctrl+P` to open the command palette (`Cmd+P` also works when forwarded by the terminal).
-Use `1`, `2`, `3`, or `4` to switch between Files, Transfers, Shares, and Settings.
+Use `1`, `2`, `3`, `4`, or `5` to switch between Files, Transfers, Shares, Settings, and About.
 Navigate with arrow keys or `j/k/h/l`; use `Space` to select files, `u` to upload, `d` to download, and `s` to create a share link.
-Settings supports English/Chinese, token login, saved accounts, and account switching.
+Settings is organized into Interface, Network, Updates, and Accounts for language, proxy and User-Agent, version checks, and account management.
+Click a category or use `Tab` / `Shift+Tab`; use the arrow keys to select an option and `Enter` to change it.
+Search fields above the file and share lists support clicking or `Ctrl+F` / `f`. File searches fuzzy-match names and paths across the entire library, including subfolders; share searches also match URLs and share codes. Press `d` to download a selected shared file.
 The upload picker accepts paths and wildcard patterns, with `Tab` completion and `Ctrl+A` to select all matching files before upload confirmation.
-Downloads open a directory picker with folder browsing, path input, and completion before confirming the destination.
+Downloads open a directory picker at the current user's `~/Downloads` (created if needed), with folder browsing, path input, and completion before confirming the destination. `--local` overrides both the initial upload directory and the default download directory.
 Click **Browse…** beside a local path, or press `Ctrl+B` / `F4`, to open the TUI file dialog with mouse selection, double-click navigation, and Select/Cancel buttons.
 Press `?` for the full keyboard guide.
 
@@ -241,7 +276,7 @@ thufs mkdir repo:course-lib/slides/week1
 thufs mkdir submissions/week1
 ```
 
-Download a file:
+Download a file or directory:
 
 ```bash
 thufs download repo:course-lib/slides/week1.pdf
@@ -252,10 +287,14 @@ thufs download "https://cloud.tsinghua.edu.cn/f/abc123XYZ_/?dl=1"
 thufs download --share abc123XYZ_
 thufs download --mode sequential repo:course-lib/slides/week1.pdf
 thufs download --mode parallel --workers 8 repo:course-lib/slides/week1.pdf
+thufs download repo:course-lib/slides/
+thufs download repo:course-lib
+thufs download https://cloud.tsinghua.edu.cn/d/abc123XYZ_/
 ```
 
-If the local path is omitted, `download` saves into the current directory using the remote file name.
+If the local path is omitted, `download` saves into the current user's `~/Downloads` using the remote file name, creating the directory if needed.
 Public shared files are also supported: pass a full share URL, and query strings like `?dl=1` are ignored so only the token is used, or use `--share <hashcode>`.
+Directory downloads recursively preserve subfolders, empty directories, and file names. `/d/<token>/` folder shares and whole-library downloads are supported. Directory conflicts default to a unique name; `--conflict overwrite` merges into the existing directory, replacing matching files and preserving unrelated files. Interrupted directories keep temporary data for retry and best-effort resume.
 
 Create a share link:
 
@@ -377,7 +416,7 @@ Download mode can also be controlled explicitly:
 `thufs` intentionally does not aim to provide:
 
 - full bidirectional sync
-- recursive directory transfer
+- recursive directory uploads
 - named multi-account CLI profiles (the TUI supports saved accounts and account switching)
 - generic support for arbitrary Seafile instances
 - GUI or desktop resident sync behavior

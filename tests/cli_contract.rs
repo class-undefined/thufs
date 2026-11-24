@@ -57,5 +57,6 @@ fn config_show_supports_json_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"token\": \"sa...ue\""))
+        .stdout(predicate::str::contains("\"user_agent\": \"thufs/"))
         .stderr(predicate::str::is_empty());
 }

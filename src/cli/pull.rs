@@ -7,16 +7,16 @@ use crate::app::App;
 
 pub fn build_command() -> Command {
     Command::new("download")
-        .about("Download a remote file from THU Cloud Drive")
+        .about("Download a remote file or directory from THU Cloud Drive")
         .visible_alias("pull")
         .arg(
             Arg::new("remote")
-                .help("Remote file path, share URL, or share hashcode")
+                .help("Remote file or directory path, share URL, or share hashcode")
                 .required(true),
         )
         .arg(
             Arg::new("local")
-                .help("Local destination file or existing directory")
+                .help("Local destination path or existing parent directory (default: ~/Downloads/<remote name>)")
                 .required(false),
         )
         .arg(

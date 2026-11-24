@@ -9,9 +9,37 @@ use super::backend::{Message, Request};
 /// An explicit offline fixture. No cloud requests or filesystem writes are allowed here.
 pub fn respond(request: Request) -> Message {
     match request {
+        Request::EntryDate { id, location, .. } => Message::EntryDate {
+            id,
+            location,
+            result: Ok(Some("2026-11-20 16:30:00 +08:00".into())),
+        },
+        Request::SaveProxy { id, proxy } => Message::ProxySaved {
+            id,
+            result: proxy.normalized().map_err(|error| error.to_string()),
+        },
         Request::UseSession { .. } | Request::SaveLanguage(_) => {
             unreachable!("settings are dispatched separately")
         }
+        Request::SaveUpdateChecks(enabled) => Message::UpdateChecksSaved {
+            enabled,
+            result: Ok(()),
+        },
+        Request::CheckUpdates { id, .. } => Message::UpdateChecked {
+            id,
+            result: Ok(crate::app::update_service::UpdateCheck {
+                current_version: env!("CARGO_PKG_VERSION").into(),
+                latest_version: Some(env!("CARGO_PKG_VERSION").into()),
+                update_available: false,
+                release_url: crate::app::update_service::RELEASES_URL.into(),
+                checked_at: 0,
+                cached: false,
+            }),
+        },
+        Request::SaveUserAgent { id, value } => Message::UserAgentSaved {
+            id,
+            result: crate::config::normalize_user_agent(&value).map_err(|error| error.to_string()),
+        },
         Request::Authenticate { id, .. } => Message::Authenticated {
             id,
             result: Err("Demo is read-only".into()),
@@ -50,6 +78,28 @@ pub fn respond(request: Request) -> Message {
             id,
             result: Ok(entries(&location.path)),
         },
+        Request::LibraryIndex { id, cancel, .. } => {
+            let mut pending = vec!["/".to_string()];
+            let mut all = Vec::new();
+            while let Some(path) = pending.pop() {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Message::LibraryIndex {
+                        id,
+                        result: Err("Search cancelled".into()),
+                    };
+                }
+                for entry in entries(&path) {
+                    if entry.kind == "dir" {
+                        pending.push(entry.path.clone());
+                    }
+                    all.push(entry);
+                }
+            }
+            Message::LibraryIndex {
+                id,
+                result: Ok(all),
+            }
+        }
         Request::Shares { id } => Message::Shares {
             id,
             result: Ok(vec![ShareItem {
@@ -132,7 +182,7 @@ pub fn entries(path: &str) -> Vec<ListItem> {
             path: format!("{}/{name}", path.trim_end_matches('/')),
             kind: kind.into(),
             size,
-            updated_at: None,
+            updated_at: Some("2026-11-20 16:30:00 +08:00".into()),
         })
         .collect()
 }

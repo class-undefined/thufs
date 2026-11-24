@@ -99,13 +99,37 @@ impl Language {
 }
 
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Search", "搜索"),
+    ("Search library", "整库搜索"),
+    ("Search shares", "分享搜索"),
+    ("Name or path · Ctrl+F", "名称或路径 · Ctrl+F"),
+    ("Name, link or code · Ctrl+F", "名称、链接或分享码 · Ctrl+F"),
+    (
+        "Search the entire library or share links",
+        "搜索整个资料库或分享链接",
+    ),
+    ("Searching the entire library…", "正在搜索整个资料库……"),
+    (
+        "Enter keeps results · Esc clears search",
+        "Enter 保留结果 · Esc 清除搜索",
+    ),
+    ("{0} of {1} items", "{0} / {1} 个项目"),
+    ("{0} of {1} links", "{0} / {1} 个链接"),
+    (
+        "Select a share link to download.",
+        "请选择一个分享链接进行下载。",
+    ),
+    (
+        "d  Download     y  Copy link     x  Revoke",
+        "d 下载     y 复制链接     x 撤销",
+    ),
     ("Browse…", "浏览…"),
     ("Select", "选择"),
     ("Cancel", "取消"),
     ("Use directory", "选用目录"),
     (
-        "tab next field   Ctrl+B browse   enter confirm   esc cancel",
-        "tab 下一项  Ctrl+B 浏览  enter 确认  esc 取消",
+        "tab complete   ↑↓ fields   Ctrl+B browse   enter confirm   esc cancel",
+        "Tab 补全  ↑↓ 切换项  Ctrl+B 浏览  Enter 确认  Esc 取消",
     ),
     (
         "↑↓ select  tab complete  enter open/select  esc cancel",
@@ -154,6 +178,120 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Shares", "分享"),
     ("SHARE LINKS", "分享链接"),
     ("Settings", "设置"),
+    ("About", "关于"),
+    ("Author", "作者"),
+    ("Repository", "仓库"),
+    ("MODIFIED", "修改时间"),
+    ("Modified: {0}", "修改时间：{0}"),
+    ("Unknown", "未知"),
+    (
+        "Cannot load the modification time.",
+        "暂时无法读取修改时间。",
+    ),
+    ("Check for updates", "检查更新"),
+    (
+        "Check the latest stable thufs release",
+        "检查 thufs 最新稳定版本",
+    ),
+    ("Automatic update checks", "自动检测更新"),
+    ("On", "开启"),
+    ("Off", "关闭"),
+    ("Updates", "版本更新"),
+    ("Updates not checked", "尚未检查更新"),
+    ("Checking for updates…", "正在检查更新…"),
+    (
+        "Check unavailable · press u to retry",
+        "检查失败 · 按 u 重试",
+    ),
+    ("No stable release published yet", "尚未发布稳定版本"),
+    ("No newer release found.", "未发现更新版本。"),
+    (
+        "Cannot check for updates. Try again later.",
+        "暂时无法检查更新，请稍后重试。",
+    ),
+    (
+        "{0} available · Enter for details",
+        "发现 {0} · Enter 查看详情",
+    ),
+    ("Installed: {0}", "已安装：{0}"),
+    ("Latest stable: {0}", "最新稳定版：{0}"),
+    (
+        "thufs {0} is available · press 5 for details",
+        "发现 thufs {0} · 按 5 查看",
+    ),
+    (
+        "u check updates   i details   esc back   q quit",
+        "u 检查更新   i 详情   esc 返回   q 退出",
+    ),
+    ("User-Agent", "User-Agent"),
+    ("Interface", "界面"),
+    ("Network", "网络"),
+    ("Choose the interface language", "选择界面语言"),
+    ("Proxy and HTTP request settings", "代理和 HTTP 请求设置"),
+    (
+        "Version checks and release information",
+        "版本检测和发布信息",
+    ),
+    ("Check failed", "检查失败"),
+    (
+        "Interface, network, updates, and account settings",
+        "界面、网络、更新和账号设置",
+    ),
+    (
+        "tab category  ↑↓ option  enter change  esc back  q quit",
+        "Tab 切换分类  ↑↓ 选项  Enter 修改  Esc 返回  q 退出",
+    ),
+    ("Proxy", "代理"),
+    ("Proxy settings", "代理设置"),
+    ("Proxy mode", "代理模式（←/→ 或 Space 切换）"),
+    ("Proxy URL", "代理地址"),
+    ("Auto", "自动检测"),
+    ("Manual", "手动指定"),
+    ("Direct", "直连"),
+    ("Auto (environment / system)", "自动检测（环境变量 / 系统）"),
+    ("Direct (no proxy)", "直连（不使用代理）"),
+    (
+        "Auto uses environment/system proxies. Manual accepts a proxy URL.",
+        "自动检测环境变量和系统代理；手动模式填写代理地址。",
+    ),
+    (
+        "Enter a valid proxy URL, such as http://127.0.0.1:7890.",
+        "请输入有效代理地址，例如 http://127.0.0.1:7890。",
+    ),
+    (
+        "Proxy scheme must be http, https, socks5, or socks5h.",
+        "代理协议应为 http、https、socks5 或 socks5h。",
+    ),
+    (
+        "Enter a proxy host and port without a path, query, or fragment.",
+        "代理地址仅填写主机和端口，不包含路径、查询参数或片段。",
+    ),
+    (
+        "Proxy mode must be auto, manual, or direct.",
+        "代理模式应为 auto、manual 或 direct。",
+    ),
+    (
+        "Cannot configure the proxy. Check its address and hostname.",
+        "无法配置代理，请检查地址和主机名。",
+    ),
+    (
+        "Language, User-Agent, and account settings",
+        "语言、User-Agent 和账号设置",
+    ),
+    (
+        "Custom User-Agent (blank restores default)",
+        "自定义 User-Agent（留空恢复默认）",
+    ),
+    ("Default: {0}", "默认：{0}"),
+    (
+        "User-Agent must contain printable ASCII characters only.",
+        "User-Agent 只能包含可打印的 ASCII 字符。",
+    ),
+    ("Author and project repository", "作者和项目仓库"),
+    (
+        "1 files   4 settings   esc back   ? help   q quit",
+        "1 文件   4 设置   esc 返回   ? 帮助   q 退出",
+    ),
     ("Language", "界面语言"),
     ("Account", "账号"),
     ("Switch account", "切换账号"),
@@ -161,6 +299,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Add account", "添加账号"),
     ("Sign out", "退出登录"),
     ("Not signed in", "未登录"),
+    ("Loading account…", "正在读取账号…"),
     ("Environment account", "环境变量账号"),
     ("CLI account", "CLI 配置账号"),
     ("Settings saved", "设置已保存"),
@@ -237,12 +376,13 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "更改筛选条件，或按 Esc 清除。",
     ),
     (
-        "Space select files · a select all",
-        "Space 选择文件 · a 全选",
+        "Space select items · a select all",
+        "Space 选择项目 · a 全选",
     ),
     ("Select a file to see its details.", "选择文件以查看详情。"),
     ("Open folder", "打开文件夹"),
     ("Download", "下载"),
+    ("Download folder", "下载目录"),
     ("Create share link", "创建分享链接"),
     ("Copy remote path", "复制远程路径"),
     ("A clear runway", "暂无传输任务"),
@@ -309,8 +449,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("MAKE YOURSELF AT HOME", "快捷键帮助"),
     ("Your cloud drive. One keyboard.", "使用键盘管理你的云盘。"),
     (
-        "Files / Transfers / Shares / Settings",
-        "文件 / 传输 / 分享 / 设置",
+        "Files / Transfers / Shares / Settings / About",
+        "文件 / 传输 / 分享 / 设置 / 关于",
     ),
     ("Search commands; Tab completes", "搜索命令，Tab 补全"),
     ("Move selection; PgUp/PgDn page", "移动选择，PgUp/PgDn 翻页"),
@@ -355,8 +495,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ),
     ("Close overlay / quit workspace", "关闭弹窗 / 退出"),
     (
-        "Default conflict policy: uniquify. Folder transfers are not supported.",
-        "默认冲突策略：自动改名。暂不支持文件夹传输。",
+        "Default conflict policy: uniquify. Folder uploads are not supported.",
+        "默认冲突策略：自动改名。暂不支持目录上传。",
     ),
     (
         "Mouse: click to select, double-click to open, wheel to scroll.",
@@ -364,7 +504,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ),
     ("Upload a file", "上传文件"),
     ("Upload files", "上传文件"),
-    ("Download files", "下载文件"),
+    ("Download items", "下载项目"),
     ("Create a share link", "创建分享链接"),
     ("Go to a directory", "跳转目录"),
     ("New folder", "新建文件夹"),
@@ -415,7 +555,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("hidden", "隐藏"),
     ("Browse your cloud libraries", "浏览云盘资料库"),
     ("Choose a local file to upload", "选择要上传的本地文件"),
-    ("Download the selected files", "下载选中的文件"),
+    ("Download selected files or folders", "下载选中的文件或目录"),
     (
         "Create a link with optional password and expiry",
         "创建分享，可设置密码和有效期",
@@ -497,20 +637,12 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "↑↓ 选择  enter 打开  tab 资料库  u 上传  4 设置  ? 帮助",
     ),
     (
-        "↑↓ navigate   x cancel   r retry   enter details   1 files   ? help   q quit",
-        "↑↓ 选择   x 取消   r 重试   enter 详情   1 文件   ? 帮助   q 退出",
+        "↑↓ x cancel  r retry  enter details  Shift+C clear  ? help",
+        "↑↓ 选择  x 取消  r 重试  enter 详情  Shift+C 清除  ? 帮助",
     ),
     (
-        "↑↓ navigate   y copy   x revoke   f find   r refresh   1 files   ? help   q quit",
-        "↑↓ 选择   y 复制   x 撤销   f 查找   r 刷新   1 文件   ? 帮助",
-    ),
-    (
-        "x cancel  ·  r retry failed/cancelled  ·  enter details  ·  C clear finished",
-        "x 取消 · r 重试失败/取消任务 · enter 详情 · C 清除已结束任务",
-    ),
-    (
-        "y copy link  ·  enter details  ·  x revoke  ·  f filter  ·  r refresh",
-        "y 复制链接 · enter 详情 · x 撤销 · f 筛选 · r 刷新",
+        "d download  y copy  x revoke  f search  r refresh  ? help",
+        "d 下载  y 复制  x 撤销  f 搜索  r 刷新  ? 帮助",
     ),
     (
         "This workspace needs at least 60 × 18 cells.",
@@ -543,8 +675,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
         "请先打开资料库。按 Tab 切换到资料库列表。",
     ),
     (
-        "Select a file to download. Space selects multiple files.",
-        "请选择要下载的文件，Space 可多选。",
+        "Select a file or folder to download. Space selects multiple items.",
+        "请选择要下载的文件或目录，Space 可多选。",
     ),
     (
         "Select a file or folder to share.",
@@ -613,4 +745,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ),
     ("Expires in {0} days", "{0} 天后到期"),
     ("Loading local files", "正在加载本地文件"),
+    (
+        "{0} item(s) will be added to your transfer queue.",
+        "将把 {0} 个项目加入传输队列。",
+    ),
 ];

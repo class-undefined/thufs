@@ -53,7 +53,15 @@ impl ListService {
         Ok(ListResult {
             repo: resolved.repo_name,
             path: resolved.path,
-            items: entries.into_iter().map(ListItem::from).collect(),
+            items: entries
+                .into_iter()
+                .map(|mut entry| {
+                    if !show_time {
+                        entry.updated_at = None;
+                    }
+                    ListItem::from(entry)
+                })
+                .collect(),
         })
     }
 
@@ -135,6 +143,8 @@ mod tests {
                 token: Some("test-token".to_string()),
                 default_repo: Some("course-lib".to_string()),
                 output: OutputMode::Human,
+                user_agent: None,
+                proxy: crate::network::ProxyConfig::Direct,
             })
             .expect("write config");
         (temp, manager)

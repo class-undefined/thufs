@@ -226,7 +226,19 @@ pub fn completion(
     cwd: &Path,
     entries: &[LocalEntry],
     selected: usize,
+    directory: Option<&Path>,
 ) -> Option<String> {
+    if !input.ends_with(std::path::MAIN_SEPARATOR) && !input.ends_with('/') {
+        if let Some(directory) = directory {
+            return Some(format!(
+                "{}{}",
+                directory
+                    .to_str()?
+                    .trim_end_matches(std::path::MAIN_SEPARATOR),
+                std::path::MAIN_SEPARATOR
+            ));
+        }
+    }
     let entry = entries.get(selected)?;
     let strings: Vec<_> = entries
         .iter()
@@ -400,20 +412,47 @@ mod tests {
         let temp = fixture();
         let result = matches("rep", temp.path(), false).unwrap();
         assert!(
-            completion("rep", temp.path(), &result.entries, 0)
+            completion("rep", temp.path(), &result.entries, 0, None)
                 .unwrap()
                 .ends_with("report ")
         );
         assert!(
-            completion("rep", temp.path(), &result.entries, 1)
+            completion("rep", temp.path(), &result.entries, 1, None)
                 .unwrap()
                 .ends_with("report two.txt")
         );
         let directory = matches("fold", temp.path(), false).unwrap();
         assert!(
-            completion("fold", temp.path(), &directory.entries, 0)
+            completion("fold", temp.path(), &directory.entries, 0, None)
                 .unwrap()
                 .ends_with(std::path::MAIN_SEPARATOR)
+        );
+    }
+
+    #[test]
+    fn existing_empty_directory_completion_adds_a_separator_without_requiring_children() {
+        let temp = fixture();
+        let result = directories("folder", temp.path(), false).unwrap();
+        assert!(result.entries.is_empty());
+        let value = completion(
+            "folder",
+            temp.path(),
+            &result.entries,
+            0,
+            result.directory.as_deref(),
+        )
+        .unwrap();
+        assert!(value.ends_with(std::path::MAIN_SEPARATOR));
+        assert_eq!(Path::new(&value), temp.path().join("folder"));
+        assert!(
+            completion(
+                &value,
+                temp.path(),
+                &result.entries,
+                0,
+                result.directory.as_deref()
+            )
+            .is_none()
         );
     }
 
@@ -425,13 +464,13 @@ mod tests {
         }
         let result = matches("报", temp.path(), false).unwrap();
         assert!(
-            completion("报", temp.path(), &result.entries, 0)
+            completion("报", temp.path(), &result.entries, 0, None)
                 .unwrap()
                 .ends_with("报告-")
         );
         let result = matches("*.txt", temp.path(), false).unwrap();
-        assert!(completion("", temp.path(), &result.entries, 0).is_some());
-        assert!(completion("", temp.path(), &[], 0).is_none());
+        assert!(completion("", temp.path(), &result.entries, 0, None).is_some());
+        assert!(completion("", temp.path(), &[], 0, None).is_none());
     }
 
     #[test]
