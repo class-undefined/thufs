@@ -1,7 +1,3 @@
-![thufs TUI：本机 iTerm2 终端实拍（离线演示）](./docs/assets/tui-terminal.png)
-
-*本机 iTerm2 中运行 `cargo run --locked -- tui --demo` 的实拍截图，使用内置示例数据，不展示真实账号信息。*
-
 # thufs
 
 [![GitHub stars](https://img.shields.io/github/stars/class-undefined/thufs?style=flat-square)](https://github.com/class-undefined/thufs/stargazers)
@@ -14,6 +10,10 @@
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Backend: Seafile](https://img.shields.io/badge/Backend-Seafile-ff6b6b?style=flat-square)](https://www.seafile.com/)
 [![README in English](https://img.shields.io/badge/README-English-blue?style=flat-square)](./README.en.md)
+
+![thufs TUI：本机 iTerm2 终端实拍（离线演示）](./docs/assets/tui-terminal.png)
+
+*本机 iTerm2 中运行 `cargo run --locked -- tui --demo` 的实拍截图，使用内置示例数据，不展示真实账号信息。*
 
 `thufs` 是一个面向清华云盘终端用户的 CLI 工具，基于 Seafile API 实现，强调“上传、下载、列目录、分享”这类高频、可脚本化的文件操作。
 
